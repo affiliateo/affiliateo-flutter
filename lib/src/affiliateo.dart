@@ -193,17 +193,7 @@ class Affiliateo with WidgetsBindingObserver {
     }
   }
 
-  /// Track a screen view event.
-  void trackScreen(String screenName) {
-    _sendEvent('screen_view', screen: screenName);
-  }
-
-  /// Track a custom event with optional metadata.
-  void trackEvent(String eventName, {Map<String, dynamic>? metadata}) {
-    _sendEvent('custom', screen: eventName, metadata: metadata);
-  }
-
-  Future<void> _sendEvent(String type, {String? screen, Map<String, dynamic>? metadata}) async {
+  Future<void> _sendEvent(String type) async {
     final deviceId = _deviceId;
     final campaignId = _campaignId;
     if (deviceId == null || campaignId == null) return;
@@ -218,9 +208,7 @@ class Affiliateo with WidgetsBindingObserver {
           'events': [
             {
               'type': type,
-              if (screen != null) 'screen': screen,
               'timestamp': DateTime.now().toUtc().toIso8601String(),
-              if (metadata != null) 'metadata': metadata,
             }
           ],
         }),
