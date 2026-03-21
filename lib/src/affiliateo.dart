@@ -175,6 +175,35 @@ class Affiliateo with WidgetsBindingObserver {
   }
 
   Future<void> _sendSessionEvent(String type) async {
+    await _sendEvent(type);
+  }
+
+  void _setRevenueCatAttribute(String refCode) {
+    // RevenueCat must be set by the app developer since Dart doesn't support dynamic imports.
+    // Store the ref code so the app can read it via Affiliateo.instance.state.refCode
+    // and call: Purchases.setAttributes({"affiliateo_ref": refCode})
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _sendSessionEvent('session_start');
+    } else if (state == AppLifecycleState.paused) {
+      _sendSessionEvent('session_end');
+    }
+  }
+
+  /// Track a screen view event.
+  void trackScreen(String screenName) {
+    _sendEvent('screen_view', screen: screenName);
+  }
+
+  /// Track a custom event with optional metadata.
+  void trackEvent(String eventName, {Map<String, dynamic>? metadata}) {
+    _sendEvent('custom', screen: eventName, metadata: metadata);
+  }
+
+  Future<void> _sendEvent(String type, {String? screen, Map<String, dynamic>? metadata}) async {
     final deviceId = _deviceId;
     final campaignId = _campaignId;
     if (deviceId == null || campaignId == null) return;
@@ -189,7 +218,9 @@ class Affiliateo with WidgetsBindingObserver {
           'events': [
             {
               'type': type,
+              if (screen != null) 'screen': screen,
               'timestamp': DateTime.now().toUtc().toIso8601String(),
+              if (metadata != null) 'metadata': metadata,
             }
           ],
         }),
@@ -197,41 +228,15 @@ class Affiliateo with WidgetsBindingObserver {
     } catch (_) {}
   }
 
-  void _setRevenueCatAttribute(String refCode) {
-    // Try to set RevenueCat attribute dynamically
-    try {
-      // This requires purchases_flutter to be installed in the app
-      // We use a dynamic approach to avoid a hard dependency
-      Function.apply(
-        () async {
-          try {
-            final purchases = await Function.apply(
-              () => throw UnimplementedError('RevenueCat not available'),
-              [],
-            );
-          } catch (_) {}
-        },
-        [],
-      );
-    } catch (_) {
-      // purchases_flutter not installed — that's fine
-    }
-  }
-
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) {
-      _sendSessionEvent('session_start');
-    } else if (state == AppLifecycleState.paused) {
-      _sendSessionEvent('session_end');
-    }
-  }
-
-  /// Manually set the RevenueCat attribute. Call this if automatic detection doesn't work.
+  /// Manually set the RevenueCat attribute. Call this after initialization:
+  /// ```dart
+  /// final ref = Affiliateo.instance.state.refCode;
+  /// if (ref != null) {
+  ///   Purchases.setAttributes({"affiliateo_ref": ref});
+  /// }
+  /// ```
   static Future<void> setRevenueCatRef(String refCode) async {
-    try {
-      // Import dynamically if purchases_flutter is available
-      // App developer should call: Purchases.setAttributes({"affiliateo_ref": refCode})
-    } catch (_) {}
+    // App developer should call Purchases.setAttributes directly
+    // since Dart doesn't support dynamic imports like JS/Swift/Kotlin
   }
 }
