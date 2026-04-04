@@ -188,9 +188,8 @@ class Affiliateo with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       _sendSessionEvent('session_start');
-    } else if (state == AppLifecycleState.paused) {
-      _sendSessionEvent('session_end');
     }
+    // No session_end — server handles inactivity via 10-minute timeout
   }
 
   Future<void> _sendEvent(String type) async {
