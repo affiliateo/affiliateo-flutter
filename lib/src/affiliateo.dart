@@ -1,5 +1,7 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 import 'dart:ui';
 
 import 'package:flutter/widgets.dart';
@@ -174,11 +176,29 @@ class Affiliateo with WidgetsBindingObserver {
         final json = jsonDecode(response.body);
         final result = IdentifyResponse.fromJson(json);
 
+        // Apple native IAP attribution. Mint a stable UUID per
+        // (campaignId, refCode) so the customer's purchase chain (initial
+        // buy + every renewal + refund) all carry the same token Apple
+        // stamped at first purchase. Customer's purchase code reads it via
+        // Affiliateo.state.appAccountToken and passes it to their IAP
+        // plugin (in_app_purchase / flutter_inapp_purchase / etc.) as
+        // StoreKit's appAccountToken.
+        //
+        // Best-effort: registration failure here means the next launch
+        // retries (backend dedups via mobile_app_visitors unique constraint).
+        String? appleToken;
+        if (Platform.isIOS && result.refCode != null) {
+          appleToken = await _getOrMintAppleAccountToken(campaignId, result.refCode!);
+          // Fire-and-forget; don't block identify completion
+          unawaited(_registerAppleToken(campaignId, result.visitorId, appleToken));
+        }
+
         _state = AffiliateoState(
           refCode: result.refCode,
           isMatched: result.matched,
           isLoading: false,
           visitorId: result.visitorId,
+          appAccountToken: appleToken,
         );
 
         // Auto-set RevenueCat attribute if matched
@@ -192,6 +212,51 @@ class Affiliateo with WidgetsBindingObserver {
       _state = _state.copyWith(isLoading: false);
     }
   }
+
+  /// Get or mint a stable StoreKit 2 appAccountToken for this affiliate match.
+  /// Persisted in SharedPreferences keyed by (campaignId, refCode) so the same
+  /// UUID is reused across app launches for the same affiliate.
+  Future<String> _getOrMintAppleAccountToken(String campaignId, String refCode) async {
+    final prefs = await SharedPreferences.getInstance();
+    final key = 'affiliateo_apple_token:$campaignId:$refCode';
+    final existing = prefs.getString(key);
+    if (existing != null && _isUuidV4(existing)) return existing;
+    final fresh = _generateUuidV4();
+    await prefs.setString(key, fresh);
+    return fresh;
+  }
+
+  Future<void> _registerAppleToken(String campaignId, String visitorId, String token) async {
+    try {
+      await http.post(
+        Uri.parse('$_apiUrl/api/v1/mobile/apple-token'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({
+          'campaign_id': campaignId,
+          'visitor_id': visitorId,
+          'token': token,
+        }),
+      );
+    } catch (_) {
+      // Best-effort: backend dedups so next launch retries safely.
+    }
+  }
+
+  // RFC 4122 v4 UUID. Dart doesn't ship a built-in UUID generator and we
+  // don't want to add a transitive dep just for this, so we use the same
+  // string-replace pattern as the React Native and Vanilla JS SDKs.
+  String _generateUuidV4() {
+    final r = Random.secure();
+    String hex(int n) => n.toRadixString(16).padLeft(2, '0');
+    final bytes = List<int>.generate(16, (_) => r.nextInt(256));
+    bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
+    bytes[8] = (bytes[8] & 0x3f) | 0x80; // variant 10
+    final s = bytes.map(hex).join();
+    return '${s.substring(0, 8)}-${s.substring(8, 12)}-${s.substring(12, 16)}-${s.substring(16, 20)}-${s.substring(20)}';
+  }
+
+  static final _uuidRe = RegExp(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', caseSensitive: false);
+  bool _isUuidV4(String s) => _uuidRe.hasMatch(s);
 
   Future<void> _sendSessionEvent(String type) async {
     await _sendEvent(type);

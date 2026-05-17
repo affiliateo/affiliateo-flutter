@@ -46,11 +46,20 @@ class AffiliateoState {
   final bool isLoading;
   final String? visitorId;
 
+  /// StoreKit 2 appAccountToken UUID (iOS only). Pass this to your IAP
+  /// plugin's purchase call so Apple stamps it onto the transaction and our
+  /// webhook can resolve it back to the affiliate.
+  ///
+  /// Null before identify completes, when the device isn't matched to any
+  /// affiliate, or on Android.
+  final String? appAccountToken;
+
   const AffiliateoState({
     this.refCode,
     this.isMatched = false,
     this.isLoading = true,
     this.visitorId,
+    this.appAccountToken,
   });
 
   AffiliateoState copyWith({
@@ -58,12 +67,14 @@ class AffiliateoState {
     bool? isMatched,
     bool? isLoading,
     String? visitorId,
+    String? appAccountToken,
   }) {
     return AffiliateoState(
       refCode: refCode ?? this.refCode,
       isMatched: isMatched ?? this.isMatched,
       isLoading: isLoading ?? this.isLoading,
       visitorId: visitorId ?? this.visitorId,
+      appAccountToken: appAccountToken ?? this.appAccountToken,
     );
   }
 }
