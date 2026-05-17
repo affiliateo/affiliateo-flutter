@@ -57,8 +57,27 @@ class Affiliateo with WidgetsBindingObserver {
     // Listen for app lifecycle
     WidgetsBinding.instance.addObserver(_instance);
 
-    // Identify on startup
+    // Identify on startup + auto-fire one screen_view so session_time has
+    // >= 2 timestamps (otherwise max - min = 0).
     await _instance._identify();
+    await _instance._sendEvent(
+      'screen_view',
+      screen: '[Entry]',
+      metadata: {'auto': true},
+    );
+  }
+
+  /// Fire a screen_view event for a specific screen.
+  /// Call from `initState()` of each screen or from a route observer.
+  static Future<void> page(String screenName, [Map<String, dynamic>? metadata]) async {
+    await _instance._sendEvent('screen_view', screen: screenName, metadata: metadata);
+  }
+
+  /// Fire a custom event with arbitrary name + metadata.
+  static Future<void> track(String eventName, [Map<String, dynamic>? metadata]) async {
+    final merged = <String, dynamic>{'event': eventName};
+    if (metadata != null) merged.addAll(metadata);
+    await _instance._sendEvent('custom', metadata: merged);
   }
 
   /// Get a stable device ID. Uses platform ID first, falls back to saved UUID.
@@ -188,14 +207,33 @@ class Affiliateo with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       _sendSessionEvent('session_start');
+    } else if (state == AppLifecycleState.paused || state == AppLifecycleState.inactive) {
+      // Fire one final screen_view on background. Overrides the older
+      // "server uses 10-min timeout" design so session_time has a real
+      // "last activity" stamp close to when the user actually left.
+      _sendEvent(
+        'screen_view',
+        screen: '[Background]',
+        metadata: {'reason': 'background'},
+      );
     }
-    // No session_end — server handles inactivity via 10-minute timeout
   }
 
-  Future<void> _sendEvent(String type) async {
+  Future<void> _sendEvent(
+    String type, {
+    String? screen,
+    Map<String, dynamic>? metadata,
+  }) async {
     final deviceId = _deviceId;
     final campaignId = _campaignId;
     if (deviceId == null || campaignId == null) return;
+
+    final event = <String, dynamic>{
+      'type': type,
+      'timestamp': DateTime.now().toUtc().toIso8601String(),
+    };
+    if (screen != null) event['screen'] = screen;
+    if (metadata != null) event['metadata'] = metadata;
 
     try {
       await http.post(
@@ -204,12 +242,7 @@ class Affiliateo with WidgetsBindingObserver {
         body: jsonEncode({
           'campaign_id': campaignId,
           'device_id': deviceId,
-          'events': [
-            {
-              'type': type,
-              'timestamp': DateTime.now().toUtc().toIso8601String(),
-            }
-          ],
+          'events': [event],
         }),
       );
     } catch (_) {}
