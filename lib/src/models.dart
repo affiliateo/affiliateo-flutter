@@ -54,12 +54,21 @@ class AffiliateoState {
   /// affiliate, or on Android.
   final String? appAccountToken;
 
+  /// Play Billing obfuscatedAccountId UUID (Android only). Pass this to your
+  /// IAP plugin's PurchaseParam (applicationUserName) so Google stamps it
+  /// onto the RTDN payloads our backend receives.
+  ///
+  /// Null before identify completes, when the device isn't matched to any
+  /// affiliate, or on iOS.
+  final String? obfuscatedAccountId;
+
   const AffiliateoState({
     this.refCode,
     this.isMatched = false,
     this.isLoading = true,
     this.visitorId,
     this.appAccountToken,
+    this.obfuscatedAccountId,
   });
 
   AffiliateoState copyWith({
@@ -68,6 +77,7 @@ class AffiliateoState {
     bool? isLoading,
     String? visitorId,
     String? appAccountToken,
+    String? obfuscatedAccountId,
   }) {
     return AffiliateoState(
       refCode: refCode ?? this.refCode,
@@ -75,6 +85,7 @@ class AffiliateoState {
       isLoading: isLoading ?? this.isLoading,
       visitorId: visitorId ?? this.visitorId,
       appAccountToken: appAccountToken ?? this.appAccountToken,
+      obfuscatedAccountId: obfuscatedAccountId ?? this.obfuscatedAccountId,
     );
   }
 }

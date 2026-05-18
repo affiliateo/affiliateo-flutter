@@ -193,12 +193,24 @@ class Affiliateo with WidgetsBindingObserver {
           unawaited(_registerAppleToken(campaignId, result.visitorId, appleToken));
         }
 
+        // Google Play native attribution. Same UUID shape as Apple, different
+        // platform + endpoint. Customer reads it via
+        // Affiliateo.state.obfuscatedAccountId and passes it to in_app_purchase
+        // as PurchaseParam.applicationUserName (surfaces as obfuscatedAccountId
+        // on Android).
+        String? obfuscatedAccountId;
+        if (Platform.isAndroid && result.refCode != null) {
+          obfuscatedAccountId = await _getOrMintGoogleAccountId(campaignId, result.refCode!);
+          unawaited(_registerGoogleAccountId(campaignId, result.visitorId, obfuscatedAccountId));
+        }
+
         _state = AffiliateoState(
           refCode: result.refCode,
           isMatched: result.matched,
           isLoading: false,
           visitorId: result.visitorId,
           appAccountToken: appleToken,
+          obfuscatedAccountId: obfuscatedAccountId,
         );
 
         // Auto-set RevenueCat attribute if matched
@@ -235,6 +247,35 @@ class Affiliateo with WidgetsBindingObserver {
           'campaign_id': campaignId,
           'visitor_id': visitorId,
           'token': token,
+        }),
+      );
+    } catch (_) {
+      // Best-effort: backend dedups so next launch retries safely.
+    }
+  }
+
+  /// Get or mint a stable Play Billing obfuscatedAccountId for this affiliate.
+  /// Persisted in SharedPreferences keyed by (campaignId, refCode) so the same
+  /// UUID is reused across launches.
+  Future<String> _getOrMintGoogleAccountId(String campaignId, String refCode) async {
+    final prefs = await SharedPreferences.getInstance();
+    final key = 'affiliateo_google_obfuscated_account_id:$campaignId:$refCode';
+    final existing = prefs.getString(key);
+    if (existing != null && _isUuidV4(existing)) return existing;
+    final fresh = _generateUuidV4();
+    await prefs.setString(key, fresh);
+    return fresh;
+  }
+
+  Future<void> _registerGoogleAccountId(String campaignId, String visitorId, String obfuscatedAccountId) async {
+    try {
+      await http.post(
+        Uri.parse('$_apiUrl/api/v1/mobile/google-account-id'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({
+          'campaign_id': campaignId,
+          'visitor_id': visitorId,
+          'obfuscated_account_id': obfuscatedAccountId,
         }),
       );
     } catch (_) {
