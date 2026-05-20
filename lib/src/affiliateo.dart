@@ -86,12 +86,14 @@ class Affiliateo with WidgetsBindingObserver {
   /// funnel can stitch the same person across devices, reinstalls,
   /// and the anonymous to logged-in handoff. Call once after sign-in.
   /// Idempotent: safe to call on every app launch when a user is
-  /// signed in. Optional email is bounded to 320 chars (RFC 5321 max).
-  /// Best-effort: network failures are swallowed so analytics never
-  /// breaks the host app.
-  static Future<void> identify(String userId, {String? email}) async {
+  /// signed in.
+  ///
+  /// user_id only. the SDK does NOT accept, collect, or transmit
+  /// email or any other PII. Best-effort: network failures are
+  /// swallowed so analytics never breaks the host app.
+  static Future<void> identify(String userId) async {
     final cleanId = userId.trim();
-    if (cleanId.isEmpty || cleanId.length > 256) return;
+    if (cleanId.isEmpty || cleanId.length > 128) return;
     final deviceId = _instance._deviceId;
     final campaignId = _instance._campaignId;
     if (deviceId == null || campaignId == null) return;
@@ -101,10 +103,6 @@ class Affiliateo with WidgetsBindingObserver {
       'device_id': deviceId,
       'user_id': cleanId,
     };
-    final cleanEmail = email?.trim();
-    if (cleanEmail != null && cleanEmail.length >= 3 && cleanEmail.length <= 320) {
-      body['user_email'] = cleanEmail;
-    }
 
     try {
       await http.post(
