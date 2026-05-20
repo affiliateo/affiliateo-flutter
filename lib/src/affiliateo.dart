@@ -82,6 +82,41 @@ class Affiliateo with WidgetsBindingObserver {
     await _instance._sendEvent('custom', metadata: merged);
   }
 
+  /// Link this anonymous device install to a merchant user_id so the
+  /// funnel can stitch the same person across devices, reinstalls,
+  /// and the anonymous to logged-in handoff. Call once after sign-in.
+  /// Idempotent: safe to call on every app launch when a user is
+  /// signed in. Optional email is bounded to 320 chars (RFC 5321 max).
+  /// Best-effort: network failures are swallowed so analytics never
+  /// breaks the host app.
+  static Future<void> identify(String userId, {String? email}) async {
+    final cleanId = userId.trim();
+    if (cleanId.isEmpty || cleanId.length > 256) return;
+    final deviceId = _instance._deviceId;
+    final campaignId = _instance._campaignId;
+    if (deviceId == null || campaignId == null) return;
+
+    final body = <String, dynamic>{
+      'campaign_id': campaignId,
+      'device_id': deviceId,
+      'user_id': cleanId,
+    };
+    final cleanEmail = email?.trim();
+    if (cleanEmail != null && cleanEmail.length >= 3 && cleanEmail.length <= 320) {
+      body['user_email'] = cleanEmail;
+    }
+
+    try {
+      await http.post(
+        Uri.parse('${_instance._apiUrl}/api/v1/mobile/identify-user'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode(body),
+      );
+    } catch (_) {
+      // Swallow. analytics never throws in the host app.
+    }
+  }
+
   /// Get a stable device ID. Uses platform ID first, falls back to saved UUID.
   Future<String> _getStableDeviceId() async {
     final deviceInfoPlugin = DeviceInfoPlugin();
