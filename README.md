@@ -10,8 +10,8 @@ Add to your `pubspec.yaml`:
 dependencies:
   affiliateo:
     git:
-      url: https://github.com/NicoGrajales/affiliateo-flutter
-      ref: 1.0.0
+      url: https://github.com/affiliateo/affiliateo-flutter
+      ref: 2.0.0
 ```
 
 Then run `flutter pub get`.
@@ -39,12 +39,48 @@ if (state.isMatched) {
 }
 ```
 
+## Track screens (manual)
+
+Screens are tracked when you call `Affiliateo.page(name)` per screen. This matches the Mixpanel / Amplitude / Datafast model. predictable, no ghost events polluting funnels.
+
+```dart
+class HomeScreen extends StatefulWidget {
+  @override
+  State<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen> {
+  @override
+  void initState() {
+    super.initState();
+    Affiliateo.page('HomeScreen');
+  }
+
+  @override
+  Widget build(BuildContext context) => YourScreenUI();
+}
+```
+
+## Track custom events
+
+For buttons or other moments that matter (signup, trial start, etc.):
+
+```dart
+ElevatedButton(
+  onPressed: () async {
+    await Affiliateo.track('signup_completed');
+    onNext();
+  },
+  child: Text('Continue'),
+)
+```
+
 ## What it does
 
 - **Identifies the device** using IDFV (iOS) or Android ID (no permissions needed)
-- **Tracks sessions** automatically (app foreground / background)
+- **Tracks sessions** automatically (app foreground)
 - **Matches affiliate referrals** via fingerprint matching
-- **Sets RevenueCat attributes** automatically if RevenueCat is installed
+- **IAP attribution** via Apple `appAccountToken` and Google `obfuscatedAccountId`
 
 ## RevenueCat Integration
 
