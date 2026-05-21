@@ -56,17 +56,13 @@ class Affiliateo with WidgetsBindingObserver {
     // Get stable device ID
     _instance._deviceId = await _instance._getStableDeviceId();
 
-    // Listen for app lifecycle
+    // Listen for app lifecycle (foreground keep-alive only). Screens are
+    // NOT auto-tracked. the host app calls Affiliateo.page(name) per
+    // screen, matching the Mixpanel / Amplitude / Datafast mobile model.
+    // predictable + debuggable + no ghost events.
     WidgetsBinding.instance.addObserver(_instance);
 
-    // Identify on startup + auto-fire one screen_view so session_time has
-    // >= 2 timestamps (otherwise max - min = 0).
     await _instance._identify();
-    await _instance._sendEvent(
-      'screen_view',
-      screen: '[Entry]',
-      metadata: {'auto': true},
-    );
   }
 
   /// Fire a screen_view event for a specific screen.
@@ -345,16 +341,10 @@ class Affiliateo with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
+      // Foreground keep-alive ping. The server's start_mobile_session RPC
+      // handles rotation based on the 10-minute inactivity timeout. No
+      // background screen_view. that was a ghost event polluting funnels.
       _sendSessionEvent('session_start');
-    } else if (state == AppLifecycleState.paused || state == AppLifecycleState.inactive) {
-      // Fire one final screen_view on background. Overrides the older
-      // "server uses 10-min timeout" design so session_time has a real
-      // "last activity" stamp close to when the user actually left.
-      _sendEvent(
-        'screen_view',
-        screen: '[Background]',
-        metadata: {'reason': 'background'},
-      );
     }
   }
 
