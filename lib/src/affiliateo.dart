@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:developer' as developer;
 import 'dart:io';
 import 'dart:math';
 import 'dart:ui';
@@ -39,6 +40,15 @@ class Affiliateo with WidgetsBindingObserver {
   bool _configured = false;
   EventQueue? _queue;
 
+  // Debug flag. When true, every SDK decision (init, page, track, identify,
+  // flush, opt in/out, reset) is printed to the Flutter DevTools console
+  // via dart:developer log(). Only useful during development. ship with
+  // debug=false (the default) so production apps don't pay the log
+  // overhead AND don't leak SDK internals to anyone running their app
+  // attached to a debugger. Mirrors @affiliateo/web, affiliateo-swift,
+  // affiliateo-kotlin.
+  bool _debug = false;
+
   // Persistent opt-out flag. Mirrors the rest of the SDK family
   // (@affiliateo/web 3.0.0, @affiliateo/react-native 4.0.0,
   // affiliateo-swift, affiliateo-kotlin). Stored in SharedPreferences
@@ -55,14 +65,22 @@ class Affiliateo with WidgetsBindingObserver {
 
   /// Configure and start the Affiliateo SDK.
   /// Call this once at app startup.
+  ///
+  /// Pass `debug: true` (typically gated on `kDebugMode`) to print every
+  /// SDK decision to the Flutter DevTools console. Defaults to false.
   static Future<void> configure({
     required String campaignId,
     String apiUrl = 'https://affiliateo.com',
+    bool debug = false,
   }) async {
     if (_instance._configured) return;
     _instance._configured = true;
     _instance._campaignId = campaignId;
     _instance._apiUrl = apiUrl.endsWith('/') ? apiUrl.substring(0, apiUrl.length - 1) : apiUrl;
+    // Pick up the debug flag BEFORE any other side effect so the next _log
+    // call (in the opted-out branch or _identify below) actually fires.
+    _instance._debug = debug;
+    _instance._log('init', {'campaign': campaignId});
 
     // Hydrate opt-out flag BEFORE anything else touches the network. A
     // previously opted-out user staying opted out is the whole point of
@@ -74,6 +92,7 @@ class Affiliateo with WidgetsBindingObserver {
     _instance._deviceId = await _instance._getStableDeviceId();
 
     if (_instance._optedOut) {
+      _instance._log('blocked: opted out (call optIn() to re-enable)');
       // Opted-out path: skip identify + foreground ping entirely. Set
       // isLoading=false so any host UI gated on it unblocks. Public
       // methods stay available and noop until optIn() flips the flag.
@@ -100,6 +119,7 @@ class Affiliateo with WidgetsBindingObserver {
   /// Returns immediately; the queue handles delivery + retry.
   static Future<void> page(String screenName, [Map<String, dynamic>? metadata]) async {
     if (_instance._optedOut) return;
+    _instance._log('page', {'screen': screenName, 'metadata': metadata});
     _instance._enqueueEvent({
       'type': 'screen_view',
       'timestamp': DateTime.now().toUtc().toIso8601String(),
@@ -112,6 +132,7 @@ class Affiliateo with WidgetsBindingObserver {
   /// immediately; the queue handles delivery + retry.
   static Future<void> track(String eventName, [Map<String, dynamic>? metadata]) async {
     if (_instance._optedOut) return;
+    _instance._log('track', {'event': eventName, 'metadata': metadata});
     final merged = <String, dynamic>{'event': eventName};
     if (metadata != null) merged.addAll(metadata);
     _instance._enqueueEvent({
@@ -137,6 +158,7 @@ class Affiliateo with WidgetsBindingObserver {
     final deviceId = _instance._deviceId;
     final campaignId = _instance._campaignId;
     if (deviceId == null || campaignId == null) return;
+    _instance._log('identify (user)', {'user_id': cleanId});
 
     final body = <String, dynamic>{
       'campaign_id': campaignId,
@@ -160,6 +182,7 @@ class Affiliateo with WidgetsBindingObserver {
   /// the queue, regenerates the device_id, and resets state. Call on
   /// app logout when a different user might sign in afterwards.
   static Future<void> reset() async {
+    _instance._log('reset');
     await _instance._queue?.flush();
     await _instance._queue?.clear();
     // Clear the persisted UUID fallback so the next getStableDeviceId
@@ -179,6 +202,7 @@ class Affiliateo with WidgetsBindingObserver {
   /// no, sending events captured before the decision would still
   /// violate consent. Use for GDPR/CCPA "Don't track me" consent.
   static Future<void> optOut() async {
+    _instance._log('optOut');
     _instance._optedOut = true;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_optOutKey, 'true');
@@ -190,6 +214,7 @@ class Affiliateo with WidgetsBindingObserver {
   /// app foreground, the host should restart the app or call
   /// configure() again on a fresh process.
   static Future<void> optIn() async {
+    _instance._log('optIn');
     _instance._optedOut = false;
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_optOutKey);
@@ -200,7 +225,21 @@ class Affiliateo with WidgetsBindingObserver {
   /// about to be backgrounded for a long time). Best-effort: if offline
   /// the flush noops and events stay queued for the next retry cycle.
   static Future<void> flush() async {
+    _instance._log('flush requested');
     await _instance._queue?.flush();
+  }
+
+  /// Internal debug logger. No-op unless debug=true was passed to
+  /// configure(). Goes through dart:developer log() with name='Affiliateo'
+  /// so it shows up cleanly in DevTools / IDE consoles and survives the
+  /// `flutter run` log filter.
+  void _log(String msg, [Object? data]) {
+    if (!_debug) return;
+    if (data != null) {
+      developer.log('$msg | $data', name: 'Affiliateo');
+    } else {
+      developer.log(msg, name: 'Affiliateo');
+    }
   }
 
   /// Internal: enqueue a mobile event with the wire payload shape the
@@ -356,15 +395,22 @@ class Affiliateo with WidgetsBindingObserver {
           appAccountToken: appleToken,
           obfuscatedAccountId: obfuscatedAccountId,
         );
+        _log('identify success', {
+          'visitor': result.visitorId,
+          'matched': result.matched,
+          'ref': result.refCode,
+        });
 
         // Auto-set RevenueCat attribute if matched
         if (result.refCode != null) {
           _setRevenueCatAttribute(result.refCode!);
         }
       } else {
+        _log('identify failed', 'http_status=${response.statusCode}');
         _state = _state.copyWith(isLoading: false);
       }
     } catch (_) {
+      _log('identify failed (network error)');
       _state = _state.copyWith(isLoading: false);
     }
   }
