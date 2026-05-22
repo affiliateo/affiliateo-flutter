@@ -11,7 +11,7 @@ dependencies:
   affiliateo:
     git:
       url: https://github.com/affiliateo/affiliateo-flutter
-      ref: 2.0.0
+      ref: 3.0.0
 ```
 
 Then run `flutter pub get`.

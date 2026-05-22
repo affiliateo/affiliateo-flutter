@@ -3,3 +3,4 @@ library affiliateo;
 
 export 'src/affiliateo.dart';
 export 'src/models.dart';
+export 'src/screen.dart';

@@ -11,6 +11,7 @@ import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'models.dart';
+import 'queue.dart';
 
 /// Main entry point for the Affiliateo SDK.
 ///
@@ -36,6 +37,16 @@ class Affiliateo with WidgetsBindingObserver {
   String? _campaignId;
   String? _deviceId;
   bool _configured = false;
+  EventQueue? _queue;
+
+  // Persistent opt-out flag. Mirrors the rest of the SDK family
+  // (@affiliateo/web 3.0.0, @affiliateo/react-native 4.0.0,
+  // affiliateo-swift, affiliateo-kotlin). Stored in SharedPreferences
+  // so the flag survives app restart. Hot-path check inside every
+  // page/track/identify call so a mid-session decision applies
+  // immediately without waiting for the next launch.
+  static const _optOutKey = 'affiliateo_opt_out';
+  bool _optedOut = false;
 
   static AffiliateoState _state = const AffiliateoState();
 
@@ -53,8 +64,27 @@ class Affiliateo with WidgetsBindingObserver {
     _instance._campaignId = campaignId;
     _instance._apiUrl = apiUrl.endsWith('/') ? apiUrl.substring(0, apiUrl.length - 1) : apiUrl;
 
+    // Hydrate opt-out flag BEFORE anything else touches the network. A
+    // previously opted-out user staying opted out is the whole point of
+    // persistence.
+    final prefs = await SharedPreferences.getInstance();
+    _instance._optedOut = prefs.getString(_optOutKey) == 'true';
+
     // Get stable device ID
     _instance._deviceId = await _instance._getStableDeviceId();
+
+    if (_instance._optedOut) {
+      // Opted-out path: skip identify + foreground ping entirely. Set
+      // isLoading=false so any host UI gated on it unblocks. Public
+      // methods stay available and noop until optIn() flips the flag.
+      _state = const AffiliateoState(isLoading: false);
+      return;
+    }
+
+    // Initialize the event queue. Constructor kicks off async hydration
+    // from SharedPreferences and starts the connectivity listener +
+    // periodic flush timer in the background.
+    _instance._queue = EventQueue();
 
     // Listen for app lifecycle (foreground keep-alive only). Screens are
     // NOT auto-tracked. the host app calls Affiliateo.page(name) per
@@ -67,15 +97,28 @@ class Affiliateo with WidgetsBindingObserver {
 
   /// Fire a screen_view event for a specific screen.
   /// Call from `initState()` of each screen or from a route observer.
+  /// Returns immediately; the queue handles delivery + retry.
   static Future<void> page(String screenName, [Map<String, dynamic>? metadata]) async {
-    await _instance._sendEvent('screen_view', screen: screenName, metadata: metadata);
+    if (_instance._optedOut) return;
+    _instance._enqueueEvent({
+      'type': 'screen_view',
+      'timestamp': DateTime.now().toUtc().toIso8601String(),
+      'screen': screenName,
+      if (metadata != null) 'metadata': metadata,
+    });
   }
 
-  /// Fire a custom event with arbitrary name + metadata.
+  /// Fire a custom event with arbitrary name + metadata. Returns
+  /// immediately; the queue handles delivery + retry.
   static Future<void> track(String eventName, [Map<String, dynamic>? metadata]) async {
+    if (_instance._optedOut) return;
     final merged = <String, dynamic>{'event': eventName};
     if (metadata != null) merged.addAll(metadata);
-    await _instance._sendEvent('custom', metadata: merged);
+    _instance._enqueueEvent({
+      'type': 'custom',
+      'timestamp': DateTime.now().toUtc().toIso8601String(),
+      'metadata': merged,
+    });
   }
 
   /// Link this anonymous device install to a merchant user_id so the
@@ -88,6 +131,7 @@ class Affiliateo with WidgetsBindingObserver {
   /// email or any other PII. Best-effort: network failures are
   /// swallowed so analytics never breaks the host app.
   static Future<void> identify(String userId) async {
+    if (_instance._optedOut) return;
     final cleanId = userId.trim();
     if (cleanId.isEmpty || cleanId.length > 128) return;
     final deviceId = _instance._deviceId;
@@ -109,6 +153,72 @@ class Affiliateo with WidgetsBindingObserver {
     } catch (_) {
       // Swallow. analytics never throws in the host app.
     }
+  }
+
+  /// Wipe the device identity. Drains pending events first (they land
+  /// server-side under the OLD device_id which is correct), then clears
+  /// the queue, regenerates the device_id, and resets state. Call on
+  /// app logout when a different user might sign in afterwards.
+  static Future<void> reset() async {
+    await _instance._queue?.flush();
+    await _instance._queue?.clear();
+    // Clear the persisted UUID fallback so the next getStableDeviceId
+    // call mints fresh. The platform IDFV / androidId is tied to the
+    // install and can't be changed; only the UUID fallback gets fresh
+    // entropy.
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('affiliateo_device_id');
+    _instance._deviceId = await _instance._getStableDeviceId();
+    _state = const AffiliateoState(isLoading: false);
+  }
+
+  /// Stop tracking on this device. Sets a persistent opt-out flag in
+  /// SharedPreferences and silences ALL subsequent page / track /
+  /// identify calls until optIn() is called. Survives app restart.
+  /// Pending queued events are dropped — the visitor explicitly said
+  /// no, sending events captured before the decision would still
+  /// violate consent. Use for GDPR/CCPA "Don't track me" consent.
+  static Future<void> optOut() async {
+    _instance._optedOut = true;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_optOutKey, 'true');
+    await _instance._queue?.clear();
+  }
+
+  /// Re-enable tracking after a previous optOut(). Removes the
+  /// persistent flag. To resume the auto session_start that fires on
+  /// app foreground, the host should restart the app or call
+  /// configure() again on a fresh process.
+  static Future<void> optIn() async {
+    _instance._optedOut = false;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_optOutKey);
+  }
+
+  /// Force-drain the event queue immediately. Useful before a known
+  /// unrecoverable transition (entering an in-app purchase flow, app
+  /// about to be backgrounded for a long time). Best-effort: if offline
+  /// the flush noops and events stay queued for the next retry cycle.
+  static Future<void> flush() async {
+    await _instance._queue?.flush();
+  }
+
+  /// Internal: enqueue a mobile event with the wire payload shape the
+  /// server expects. Used by page() / track() and the foreground
+  /// keep-alive ping.
+  void _enqueueEvent(Map<String, dynamic> event) {
+    final cid = _campaignId;
+    final did = _deviceId;
+    final queue = _queue;
+    if (cid == null || did == null || queue == null) return;
+    queue.enqueue(
+      '$_apiUrl/api/v1/mobile/event',
+      {
+        'campaign_id': cid,
+        'device_id': did,
+        'events': [event],
+      },
+    );
   }
 
   /// Get a stable device ID. Uses platform ID first, falls back to saved UUID.
@@ -136,7 +246,12 @@ class Affiliateo with WidgetsBindingObserver {
     final saved = prefs.getString('affiliateo_device_id');
     if (saved != null) return saved;
 
-    final newId = '${Platform.isIOS ? "ios" : "android"}-${DateTime.now().microsecondsSinceEpoch.toRadixString(36)}-${Object().hashCode.toRadixString(36)}';
+    // RFC 4122 v4 UUID via the same generator used for the IAP tokens
+    // below. The old microsecondsSinceEpoch + Object().hashCode scheme
+    // had a non-zero collision risk for two devices minting fallback IDs
+    // in the same microsecond, and Object().hashCode is bucketed (16-bit
+    // on the VM) so it added less entropy than it looked like.
+    final newId = '${Platform.isIOS ? "ios" : "android"}-${_generateUuidV4()}';
     await prefs.setString('affiliateo_device_id', newId);
     return newId;
   }
@@ -329,7 +444,15 @@ class Affiliateo with WidgetsBindingObserver {
   bool _isUuidV4(String s) => _uuidRe.hasMatch(s);
 
   Future<void> _sendSessionEvent(String type) async {
-    await _sendEvent(type);
+    if (_optedOut) return;
+    // Route through the queue so foreground pings survive a flaky
+    // network the way regular page/track events do. The server's
+    // start_mobile_session RPC is idempotent so a duplicate from a
+    // queue retry just no-ops.
+    _enqueueEvent({
+      'type': type,
+      'timestamp': DateTime.now().toUtc().toIso8601String(),
+    });
   }
 
   void _setRevenueCatAttribute(String refCode) {
@@ -377,15 +500,18 @@ class Affiliateo with WidgetsBindingObserver {
     } catch (_) {}
   }
 
-  /// Manually set the RevenueCat attribute. Call this after initialization:
-  /// ```dart
-  /// final ref = Affiliateo.instance.state.refCode;
-  /// if (ref != null) {
-  ///   Purchases.setAttributes({"affiliateo_ref": ref});
-  /// }
-  /// ```
-  static Future<void> setRevenueCatRef(String refCode) async {
-    // App developer should call Purchases.setAttributes directly
-    // since Dart doesn't support dynamic imports like JS/Swift/Kotlin
-  }
+  // Note: There is intentionally no setRevenueCatRef() method here. Dart
+  // does not support dynamic imports the way JS/Swift/Kotlin do, so we
+  // cannot auto-detect or call into the purchases_flutter SDK from this
+  // package without making it a hard dependency (which would bloat every
+  // install). The README documents the one-liner the app developer
+  // writes themselves after configure():
+  //
+  //   final ref = Affiliateo.state.refCode;
+  //   if (ref != null) {
+  //     await Purchases.setAttributes({"affiliateo_ref": ref});
+  //   }
+  //
+  // Exposing an empty stub method was misleading. it advertised an
+  // integration the SDK doesn't actually provide.
 }
