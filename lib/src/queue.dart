@@ -32,15 +32,24 @@ import 'package:shared_preferences/shared_preferences.dart';
 ///   - _flushIntervalMs = 5_000 periodic auto-flush cadence
 ///   - _sizeFlushThreshold = 10 trigger flush when queue grows past
 class EventQueue {
-  EventQueue() {
+  EventQueue({
+    int flushIntervalMs = _defaultFlushIntervalMs,
+    int maxQueueSize = _defaultMaxQueueSize,
+  })  : _flushIntervalMs = flushIntervalMs.clamp(1000, 60000),
+        _maxQueueSize = maxQueueSize.clamp(10, 1000) {
     _init();
   }
 
   static const _storageKey = 'affiliateo_event_queue';
   static const _maxRetries = 3;
-  static const _maxQueueSize = 100;
-  static const _flushIntervalMs = 5000;
+  static const _defaultMaxQueueSize = 100;
+  static const _defaultFlushIntervalMs = 5000;
   static const _sizeFlushThreshold = 10;
+
+  // Configurable, clamped at construction. min 1s flush so we don't hammer
+  // the network; max 60s so the queue actually drains. Size [10, 1000].
+  final int _flushIntervalMs;
+  final int _maxQueueSize;
 
   final List<_QueuedEvent> _queue = [];
   Timer? _flushTimer;

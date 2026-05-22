@@ -72,6 +72,8 @@ class Affiliateo with WidgetsBindingObserver {
     required String campaignId,
     String apiUrl = 'https://affiliateo.com',
     bool debug = false,
+    int flushIntervalMs = 5000,
+    int maxQueueSize = 100,
   }) async {
     if (_instance._configured) return;
     _instance._configured = true;
@@ -102,8 +104,12 @@ class Affiliateo with WidgetsBindingObserver {
 
     // Initialize the event queue. Constructor kicks off async hydration
     // from SharedPreferences and starts the connectivity listener +
-    // periodic flush timer in the background.
-    _instance._queue = EventQueue();
+    // periodic flush timer in the background. Queue tuning is clamped
+    // inside EventQueue so out-of-range values can't break things.
+    _instance._queue = EventQueue(
+      flushIntervalMs: flushIntervalMs,
+      maxQueueSize: maxQueueSize,
+    );
 
     // Listen for app lifecycle (foreground keep-alive only). Screens are
     // NOT auto-tracked. the host app calls Affiliateo.page(name) per
