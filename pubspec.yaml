@@ -1,12 +1,11 @@
 name: affiliateo
 description: Mobile affiliate attribution and session tracking for Flutter apps.
+# 3.1.0: Play Install Referrer capture — the SDK reads Google's install
+# referrer once on first launch (Android) and sends it with /identify, so a
+# paid-ad install (Meta / TikTok / Google Ads) gets its source labelled
+# server-side with zero merchant work. Additive, no API changes.
 # 3.0.0: event queue + reset/optOut/optIn/flush + TrackedScreen widget.
-# Matches the @affiliateo/react-native 4.0.0 + @affiliateo/web 3.0.0 +
-# affiliateo-swift + affiliateo-kotlin 3.0.0 parity work shipped at the
-# same time. Adds connectivity_plus as a required dependency so the
-# queue can detect network outages and pause flushing instead of
-# burning retry slots on doomed requests.
-version: 3.0.0
+version: 3.1.0
 homepage: https://affiliateo.com
 repository: https://github.com/affiliateo/affiliateo-flutter
 
@@ -25,3 +24,7 @@ dependencies:
   # and trigger an immediate retry when the network returns. Mirrors
   # @react-native-community/netinfo in the RN SDK.
   connectivity_plus: ^5.0.0
+  # New in 3.1.0: reads the Play Install Referrer (Android) so paid-ad
+  # installs get their source labelled. Throws on iOS — guarded by a
+  # Platform.isAndroid check.
+  android_play_install_referrer: ^0.4.0

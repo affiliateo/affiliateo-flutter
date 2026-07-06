@@ -7,6 +7,7 @@ import 'dart:ui';
 
 import 'package:flutter/widgets.dart';
 import 'package:http/http.dart' as http;
+import 'package:android_play_install_referrer/android_play_install_referrer.dart';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -336,6 +337,31 @@ class Affiliateo with WidgetsBindingObserver {
     );
   }
 
+  /// Android only: the Play Install Referrer — the link (and its utm /
+  /// click-id tags) that installed the app. How a paid-ad install (Meta /
+  /// TikTok / Google Ads) gets its source labelled server-side. Read once,
+  /// then cached in SharedPreferences; transient failures retry next launch.
+  Future<String?> _getInstallReferrer() async {
+    if (!Platform.isAndroid) return null;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (prefs.getBool('affiliateo_install_referrer_done') == true) {
+        return prefs.getString('affiliateo_install_referrer');
+      }
+      final details = await AndroidPlayInstallReferrer.installReferrer;
+      final raw = details.installReferrer?.trim();
+      final value = (raw == null || raw.isEmpty)
+          ? null
+          : (raw.length > 2048 ? raw.substring(0, 2048) : raw);
+      if (value != null) await prefs.setString('affiliateo_install_referrer', value);
+      await prefs.setBool('affiliateo_install_referrer_done', true);
+      return value;
+    } catch (_) {
+      // Play Store unavailable / non-Play install — retry next launch.
+      return null;
+    }
+  }
+
   Future<void> _identify() async {
     final deviceId = _deviceId;
     final campaignId = _campaignId;
@@ -343,6 +369,7 @@ class Affiliateo with WidgetsBindingObserver {
 
     try {
       final deviceInfo = await _collectDeviceInfo();
+      final installReferrer = await _getInstallReferrer();
 
       final response = await http.post(
         Uri.parse('$_apiUrl/api/v1/mobile/identify'),
@@ -358,6 +385,7 @@ class Affiliateo with WidgetsBindingObserver {
           'screen_height': deviceInfo.screenHeight,
           'timezone': deviceInfo.timezone,
           'language': deviceInfo.language,
+          if (installReferrer != null) 'install_referrer': installReferrer,
         }),
       );
 
