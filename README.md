@@ -11,7 +11,7 @@ dependencies:
   affiliateo:
     git:
       url: https://github.com/affiliateo/affiliateo-flutter
-      ref: 4.4.0
+      ref: 4.4.1
 ```
 
 Then run `flutter pub get`.
@@ -84,14 +84,22 @@ ElevatedButton(
 
 ## RevenueCat Integration
 
-If you use RevenueCat, add the attribute manually after configure:
+If you use RevenueCat, add the attributes manually after configure.
+`affiliateo_visitor_id` should be set for EVERY user (matched or organic) —
+it links each purchase back to the tracked visitor, powering per-buyer spend,
+funnel journeys, and ad ROAS in your dashboard. `affiliateo_ref` only exists
+for affiliate-referred installs:
 
 ```dart
 import 'package:purchases_flutter/purchases_flutter.dart';
 
 final state = Affiliateo.state;
-if (state.refCode != null) {
-  await Purchases.setAttributes({"affiliateo_ref": state.refCode!});
+final attributes = <String, String>{
+  if (state.visitorId != null) "affiliateo_visitor_id": state.visitorId!,
+  if (state.refCode != null) "affiliateo_ref": state.refCode!,
+};
+if (attributes.isNotEmpty) {
+  await Purchases.setAttributes(attributes);
 }
 ```
 

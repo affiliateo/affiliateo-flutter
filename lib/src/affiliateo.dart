@@ -435,10 +435,11 @@ class Affiliateo with WidgetsBindingObserver {
           'ref': result.refCode,
         });
 
-        // Auto-set RevenueCat attribute if matched
-        if (result.refCode != null) {
-          _setRevenueCatAttribute(result.refCode!);
-        }
+        // No RevenueCat auto-set here: Dart can't dynamically import
+        // purchases_flutter, so the app developer sets the subscriber
+        // attributes themselves (affiliateo_visitor_id for every user +
+        // affiliateo_ref when matched) — see the note at the bottom of
+        // this file and the README's RevenueCat Integration section.
       } else {
         _log('identify failed', 'http_status=${response.statusCode}');
         _state = _state.copyWith(isLoading: false);
@@ -535,12 +536,6 @@ class Affiliateo with WidgetsBindingObserver {
     });
   }
 
-  void _setRevenueCatAttribute(String refCode) {
-    // RevenueCat must be set by the app developer since Dart doesn't support dynamic imports.
-    // Store the ref code so the app can read it via Affiliateo.instance.state.refCode
-    // and call: Purchases.setAttributes({"affiliateo_ref": refCode})
-  }
-
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
@@ -584,12 +579,19 @@ class Affiliateo with WidgetsBindingObserver {
   // does not support dynamic imports the way JS/Swift/Kotlin do, so we
   // cannot auto-detect or call into the purchases_flutter SDK from this
   // package without making it a hard dependency (which would bloat every
-  // install). The README documents the one-liner the app developer
-  // writes themselves after configure():
+  // install). The README documents the snippet the app developer writes
+  // themselves after configure(). affiliateo_visitor_id goes on EVERY
+  // user (matched or organic): the RevenueCat webhook stamps it onto the
+  // conversion row, powering per-buyer spend, funnel journeys, and ad
+  // ROAS joins. affiliateo_ref only exists for affiliate-referred installs:
   //
-  //   final ref = Affiliateo.state.refCode;
-  //   if (ref != null) {
-  //     await Purchases.setAttributes({"affiliateo_ref": ref});
+  //   final state = Affiliateo.state;
+  //   final attributes = <String, String>{
+  //     if (state.visitorId != null) "affiliateo_visitor_id": state.visitorId!,
+  //     if (state.refCode != null) "affiliateo_ref": state.refCode!,
+  //   };
+  //   if (attributes.isNotEmpty) {
+  //     await Purchases.setAttributes(attributes);
   //   }
   //
   // Exposing an empty stub method was misleading. it advertised an
