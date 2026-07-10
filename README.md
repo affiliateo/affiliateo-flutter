@@ -11,7 +11,7 @@ dependencies:
   affiliateo:
     git:
       url: https://github.com/affiliateo/affiliateo-flutter
-      ref: 4.4.1
+      ref: 4.5.0
 ```
 
 Then run `flutter pub get`.
@@ -25,7 +25,7 @@ import 'package:affiliateo/affiliateo.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await Affiliateo.configure(campaignId: 'YOUR_CAMPAIGN_ID');
+  await Affiliateo.configure(appId: 'YOUR_APP_ID');
   runApp(MyApp());
 }
 ```
@@ -41,7 +41,7 @@ if (state.isMatched) {
 
 ## Track screens (manual)
 
-Screens are tracked when you call `Affiliateo.page(name)` per screen. This matches the Mixpanel / Amplitude / Datafast model. predictable, no ghost events polluting funnels.
+Screens are tracked when you call `Affiliateo.page(name)` per screen. This matches the Mixpanel / Amplitude model. predictable, no ghost events polluting funnels.
 
 ```dart
 class HomeScreen extends StatefulWidget {

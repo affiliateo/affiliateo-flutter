@@ -20,7 +20,7 @@ import 'queue.dart';
 /// Initialize in your `main()` or `initState()`:
 ///
 /// ```dart
-/// await Affiliateo.configure(campaignId: 'YOUR_CAMPAIGN_ID');
+/// await Affiliateo.configure(appId: 'YOUR_APP_ID');
 /// ```
 ///
 /// Access the attribution state:
@@ -67,23 +67,33 @@ class Affiliateo with WidgetsBindingObserver {
   /// Configure and start the Affiliateo SDK.
   /// Call this once at app startup.
   ///
+  /// Pass your app ID via [appId]. The [campaignId] parameter is the
+  /// pre-4.5.0 name for the same value (Affiliateo campaigns are now
+  /// called apps) and keeps working; [appId] wins when both are set.
+  ///
   /// Pass `debug: true` (typically gated on `kDebugMode`) to print every
   /// SDK decision to the Flutter DevTools console. Defaults to false.
   static Future<void> configure({
-    required String campaignId,
+    String? appId,
+    @Deprecated('Affiliateo campaigns are now apps — use appId') String? campaignId,
     String apiUrl = 'https://affiliateo.com',
     bool debug = false,
     int flushIntervalMs = 5000,
     int maxQueueSize = 100,
   }) async {
+    final resolvedAppId = appId ?? campaignId;
+    if (resolvedAppId == null) {
+      developer.log('Missing appId — pass your app ID to Affiliateo.configure().', name: 'Affiliateo');
+      return;
+    }
     if (_instance._configured) return;
     _instance._configured = true;
-    _instance._campaignId = campaignId;
+    _instance._campaignId = resolvedAppId;
     _instance._apiUrl = apiUrl.endsWith('/') ? apiUrl.substring(0, apiUrl.length - 1) : apiUrl;
     // Pick up the debug flag BEFORE any other side effect so the next _log
     // call (in the opted-out branch or _identify below) actually fires.
     _instance._debug = debug;
-    _instance._log('init', {'campaign': campaignId});
+    _instance._log('init', {'app': resolvedAppId});
 
     // Hydrate opt-out flag BEFORE anything else touches the network. A
     // previously opted-out user staying opted out is the whole point of
@@ -114,7 +124,7 @@ class Affiliateo with WidgetsBindingObserver {
 
     // Listen for app lifecycle (foreground keep-alive only). Screens are
     // NOT auto-tracked. the host app calls Affiliateo.page(name) per
-    // screen, matching the Mixpanel / Amplitude / Datafast mobile model.
+    // screen, matching the Mixpanel / Amplitude mobile model.
     // predictable + debuggable + no ghost events.
     WidgetsBinding.instance.addObserver(_instance);
 
