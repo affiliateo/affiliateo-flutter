@@ -194,6 +194,55 @@ class Affiliateo with WidgetsBindingObserver {
     }
   }
 
+  /// Report the host app's RevenueCat App User ID (`Purchases.appUserID`).
+  ///
+  /// This is what lets an app owner grant an individual affiliate
+  /// complimentary access to the app from their Affiliateo dashboard.
+  /// Without it, Affiliateo can only match an affiliate to a RevenueCat
+  /// customer by email, which requires the host app to be setting
+  /// RevenueCat's `$email` attribute AND the affiliate to have used the same
+  /// address they used on Affiliateo.
+  ///
+  /// Deliberately separate from [identify]: sign-in and RevenueCat
+  /// configuration happen at different moments, and an app may do one without
+  /// the other. The server accepts either field on its own and writes only
+  /// what the request carried, so neither wipes the other.
+  ///
+  /// Write-once per device server-side. Re-sending the same id on every launch
+  /// is a no-op; a DIFFERENT id for an already-bound device is rejected, so a
+  /// tampered client cannot repoint an established device at somebody else's
+  /// RevenueCat customer.
+  ///
+  /// Call after RevenueCat has configured. Failures are swallowed so analytics
+  /// never breaks the host app.
+  static Future<void> setRevenueCatUser(String appUserId) async {
+    if (_instance._optedOut) return;
+    final rcId = appUserId.trim();
+    // 255 matches the server. RevenueCat's anonymous form
+    // (`$RCAnonymousID:<32 hex>`) is already ~50 characters.
+    if (rcId.isEmpty || rcId.length > 255) return;
+    final deviceId = _instance._deviceId;
+    final campaignId = _instance._campaignId;
+    if (deviceId == null || campaignId == null) return;
+    _instance._log('setRevenueCatUser', {'revenuecat_user_id': rcId});
+
+    final body = <String, dynamic>{
+      'campaign_id': campaignId,
+      'device_id': deviceId,
+      'revenuecat_user_id': rcId,
+    };
+
+    try {
+      await http.post(
+        Uri.parse('${_instance._apiUrl}/api/v1/mobile/identify-user'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode(body),
+      );
+    } catch (_) {
+      // Swallow. analytics never throws in the host app.
+    }
+  }
+
   /// Wipe the device identity. Drains pending events first (they land
   /// server-side under the OLD device_id which is correct), then clears
   /// the queue, regenerates the device_id, and resets state. Call on

@@ -103,6 +103,35 @@ if (attributes.isNotEmpty) {
 }
 ```
 
+### Giving affiliates free access (optional)
+
+App owners can switch complimentary access on for an individual affiliate from
+their Affiliateo dashboard, which grants a promotional entitlement in their own
+RevenueCat project. To make that possible, tell Affiliateo which RevenueCat
+customer this device is:
+
+```dart
+await Affiliateo.setRevenueCatUser(await Purchases.appUserID);
+```
+
+Call it once, after RevenueCat has configured. Calling it on every launch is
+fine and is a no-op after the first time.
+
+Without this, Affiliateo can only match an affiliate to a RevenueCat customer
+by email, which requires your app to be setting RevenueCat's `$email` attribute
+*and* the affiliate to have used the same address they used on Affiliateo. When
+that misses, the owner sees a disabled switch reading "hasn't opened your app
+yet".
+
+Notes:
+
+- Separate from `identify()` on purpose. Sign-in and RevenueCat setup happen at
+  different moments, and your app may do one without the other.
+- Write-once per device. Sending a different ID for a device that is already
+  bound is rejected, so a tampered client cannot repoint a device at another
+  customer.
+- No email or other PII is sent, same as `identify()`.
+
 ## Requirements
 
 - Flutter 3.10+
