@@ -1,0 +1,41 @@
+name: Build
+
+# Analyze the package on every push and pull request.
+#
+# Until now nothing ever checked that what landed here is valid Dart. The SDK
+# is authored on a Windows machine with no Flutter toolchain, so a typo could
+# be tagged and pulled in by `ref:`, and the first person to find out would be
+# a merchant whose app suddenly won't build.
+#
+# `flutter analyze` rather than a build: this is a library with no runnable
+# entry point, so there is nothing to compile into an app. Analyze is what
+# actually reads every line and reports errors, which is the question here.
+
+on:
+  push:
+    branches: [main]
+    tags: ['*']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  analyze:
+    name: Flutter analyze
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Show toolchain
+        run: flutter --version
+
+      - name: Resolve dependencies
+        run: flutter pub get
+
+      - name: Analyze
+        # --fatal-infos would fail the run on style suggestions, which is a
+        # different job from "is this code valid". Errors and warnings only.
+        run: flutter analyze --no-fatal-infos
