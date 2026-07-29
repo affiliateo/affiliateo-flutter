@@ -103,7 +103,7 @@ if (attributes.isNotEmpty) {
 }
 ```
 
-### Giving affiliates free access (optional)
+### Giving affiliates free access
 
 App owners can switch complimentary access on for an individual affiliate from
 their Affiliateo dashboard, which grants a promotional entitlement in their own
@@ -111,17 +111,23 @@ RevenueCat project. To make that possible, tell Affiliateo which RevenueCat
 customer this device is:
 
 ```dart
+// after Purchases.configure(...)
 await Affiliateo.setRevenueCatUser(await Purchases.appUserID);
 ```
 
-Call it once, after RevenueCat has configured. Calling it on every launch is
-fine and is a no-op after the first time.
+**This line is required on Flutter.** The Swift, Kotlin, React Native and
+WebView SDKs read the id by themselves as of 4.7.0, but Dart has no way to look
+for a package that might not be installed, so on Flutter it stays an explicit
+call.
 
-Without this, Affiliateo can only match an affiliate to a RevenueCat customer
-by email, which requires your app to be setting RevenueCat's `$email` attribute
-*and* the affiliate to have used the same address they used on Affiliateo. When
-that misses, the owner sees a disabled switch reading "hasn't opened your app
-yet".
+Call it after RevenueCat has configured, and again after `Purchases.logIn()` if
+your app has sign-in: RevenueCat issues an anonymous placeholder until then, and
+the server accepts exactly one upgrade from that placeholder to the real id.
+Sending the same id repeatedly is a no-op.
+
+An affiliate also has to have opened your app through their own referral link at
+least once, because that link is what tells us which device is theirs. Until
+then the owner sees a disabled switch reading "hasn't opened your app yet".
 
 Notes:
 
