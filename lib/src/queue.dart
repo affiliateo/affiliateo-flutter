@@ -215,7 +215,11 @@ class EventQueue {
   void _startFlushTimer() {
     _flushTimer?.cancel();
     _flushTimer = Timer.periodic(
-      const Duration(milliseconds: _flushIntervalMs),
+      // NOT const. _flushIntervalMs is an instance field assigned in the
+      // constructor's initializer list from a clamped constructor argument,
+      // so its value is only known at runtime — `const` here is the
+      // invalid_constant error this file failed analysis on.
+      Duration(milliseconds: _flushIntervalMs),
       (_) => unawaited(flush()),
     );
   }

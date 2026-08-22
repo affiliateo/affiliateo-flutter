@@ -619,39 +619,15 @@ class Affiliateo with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _sendEvent(
-    String type, {
-    String? screen,
-    Map<String, dynamic>? metadata,
-  }) async {
-    final deviceId = _deviceId;
-    final campaignId = _campaignId;
-    if (deviceId == null || campaignId == null) return;
-
-    final event = <String, dynamic>{
-      'type': type,
-      'timestamp': DateTime.now().toUtc().toIso8601String(),
-      // This path posts directly instead of queueing, so it has no retry of
-      // its own. The id still goes out: a caller retrying at a higher level
-      // would otherwise duplicate, and it keeps one rule across every send
-      // path rather than an exception here.
-      'event_id': _generateUuidV4(),
-    };
-    if (screen != null) event['screen'] = screen;
-    if (metadata != null) event['metadata'] = metadata;
-
-    try {
-      await http.post(
-        Uri.parse('$_apiUrl/api/v1/mobile/event'),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({
-          'campaign_id': campaignId,
-          'device_id': deviceId,
-          'events': [event],
-        }),
-      );
-    } catch (_) {}
-  }
+  // _sendEvent used to live here: an unqueued http.post straight to
+  // /api/v1/mobile/event. Nothing called it. Every real send path goes
+  // through _enqueueEvent so it gets persistence, retry, and the dedup id,
+  // which is why this one had quietly rotted — a direct post would have
+  // dropped the event on any network blip with no second attempt.
+  //
+  // Deleted rather than wired up: it duplicated _enqueueEvent's job with
+  // worse delivery guarantees, and `flutter analyze` fails on the
+  // unused_element warning it produced.
 
   // Note: There is intentionally no setRevenueCatRef() method here. Dart
   // does not support dynamic imports the way JS/Swift/Kotlin do, so we
