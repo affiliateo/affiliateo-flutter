@@ -190,11 +190,10 @@ await Affiliateo.setAdIdentifiers(
 );
 ```
 
-Pass `trackingAllowed: null` if your app never asks. On iPhone, Affiliateo
-passes a purchase on to the ad networks only after Allow: Apple counts handing
-an ad network the phone's details as tracking, so without it (declined, or never
-asked) the purchase stays in Affiliateo, where it still counts as revenue. On
-Android, pass
+Pass `trackingAllowed: null` if your app never asks: the prompt isn't
+needed. On iPhone, a purchase from someone who didn't tap Allow still goes,
+marked as not allowed to track and without Apple's device ids, and each network
+uses it only in its limited, privacy-safe way. On Android, pass
 whether ads personalisation is on and the Google advertising id, and add the
 `com.google.android.gms.permission.AD_ID` permission to your manifest.
 
