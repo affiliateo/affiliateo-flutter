@@ -194,6 +194,14 @@ Pass `trackingAllowed: null` if your app never asks. On Android, pass
 whether ads personalisation is on and the Google advertising id, and add the
 `com.google.android.gms.permission.AD_ID` permission to your manifest.
 
+**Send each network your sales one way only.** If your app also reports
+purchases to Meta, TikTok or Snapchat with that network's own SDK (Meta's SDK
+does it by itself while its automatic purchase logging is on), turn that
+purchase reporting off, or leave **Send app sales** off for that network.
+Otherwise the network counts every sale twice: it only matches two reports of
+one sale when both carry the same id, and its own SDK doesn't send the store's
+transaction id. Affiliateo's own two ways are matched on it and go out once.
+
 ## Requirements
 
 - Flutter 3.10+
