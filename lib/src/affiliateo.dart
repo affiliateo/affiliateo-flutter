@@ -59,6 +59,17 @@ class Affiliateo with WidgetsBindingObserver {
   static const _optOutKey = 'affiliateo_opt_out';
   bool _optedOut = false;
 
+  // Advertising ids the app handed over with setAdIdentifiers (4.9.0). Dart
+  // can't reach the plugins that read them unless they are dependencies, so
+  // the app reads them with its own and passes them in. `_trackingKnown`
+  // stays false until the app has said what the person answered, which is
+  // what lets the IDFV go out (see _adIdentifiers).
+  bool _trackingKnown = false;
+  bool? _trackingAllowed;
+  bool _advertisingIdTold = false;
+  String? _advertisingId;
+  String? _metaAnonId;
+
   static AffiliateoState _state = const AffiliateoState();
 
   /// Current attribution state.
@@ -295,6 +306,171 @@ class Affiliateo with WidgetsBindingObserver {
     await _instance._queue?.flush();
   }
 
+  /// Report a purchase to the ad networks this app sends its sales to (Meta,
+  /// TikTok, Snapchat). Call it on your paywall, right after a purchase
+  /// succeeds:
+  ///
+  /// ```dart
+  /// // RevenueCat
+  /// final result = await Purchases.purchase(PurchaseParams.package(package));
+  /// Affiliateo.purchase(
+  ///   transactionId: result.storeTransaction.transactionIdentifier,
+  ///   productId: result.storeTransaction.productIdentifier,
+  ///   price: package.storeProduct.price,
+  ///   currency: package.storeProduct.currencyCode,
+  /// );
+  /// ```
+  ///
+  /// - [transactionId]: the store's id for this payment, the App Store
+  ///   transaction id or Google Play's order id ("GPA.…"). RevenueCat's
+  ///   `transactionIdentifier` is that id on both. Affiliateo keys the report
+  ///   on it, so a payment your payment provider ALSO reports (RevenueCat,
+  ///   Apple, Google Play, Adapty connected in Affiliateo) goes to each
+  ///   network once.
+  /// - [price] and [currency]: what the person paid, in normal units (59.99).
+  /// - [kind]: [PurchaseKind.subscription] (the default) or
+  ///   [PurchaseKind.oneTime].
+  ///
+  /// Optional when a payment provider is connected to the app in Affiliateo:
+  /// first payments are then reported without it. What this call adds is the
+  /// phone's own network address, which the networks match on. Nothing here
+  /// records a sale or moves money.
+  static Future<void> purchase({
+    required String transactionId,
+    required String productId,
+    required num price,
+    required String currency,
+    PurchaseKind kind = PurchaseKind.subscription,
+  }) async {
+    if (_instance._optedOut) return;
+    final txId = transactionId.trim();
+    final code = currency.trim().toUpperCase();
+    // Same limits as the server, checked here so a wrong call says so in
+    // debug instead of failing three times in the queue.
+    if (txId.isEmpty || txId.length > 200 || !RegExp(r'^[A-Z]{3}$').hasMatch(code) || !price.isFinite || price < 0) {
+      _instance._log('purchase ignored: needs transactionId, a price in normal units and a three-letter currency');
+      return;
+    }
+    final campaignId = _instance._campaignId;
+    final deviceId = _instance._deviceId;
+    final queue = _instance._queue;
+    if (campaignId == null || deviceId == null || queue == null) return;
+    final product = productId.trim();
+    _instance._log('purchase', {'transaction': txId, 'product': product, 'price': price, 'currency': code});
+
+    queue.enqueue('${_instance._apiUrl}/api/v1/mobile/purchase', {
+      'campaign_id': campaignId,
+      'device_id': deviceId,
+      'transaction_id': txId,
+      if (product.isNotEmpty) 'product_id': product.length > 200 ? product.substring(0, 200) : product,
+      'price': price,
+      'currency': code,
+      'kind': kind.wireName,
+      if (Platform.isIOS) 'platform': 'ios' else if (Platform.isAndroid) 'platform': 'android',
+      ...await _instance._adIdentifiers(),
+    });
+    // The paywall is often the last screen before the person leaves; do not
+    // wait for the timer.
+    unawaited(queue.flush());
+  }
+
+  /// Hand over the advertising ids your app reads with its own plugins, so
+  /// purchases reach the ad networks with the best match. Every network
+  /// matches without them too, on the phone's network address.
+  ///
+  /// [trackingAllowed] is required on purpose: pass the person's answer to
+  /// your "Allow tracking?" prompt (true or false), or null when your app
+  /// never asks. On Android pass whether ads personalisation is on. The IDFV
+  /// (read by the SDK) goes only once this is known and isn't a no, and the
+  /// IDFA only with true.
+  ///
+  /// ```dart
+  /// // app_tracking_transparency
+  /// final status = await AppTrackingTransparency.trackingAuthorizationStatus;
+  /// await Affiliateo.setAdIdentifiers(
+  ///   trackingAllowed: status == TrackingStatus.authorized
+  ///       ? true
+  ///       : status == TrackingStatus.notDetermined ? null : false,
+  ///   advertisingId: await AppTrackingTransparency.getAdvertisingIdentifier(),
+  /// );
+  /// ```
+  ///
+  /// Call it again when the answer changes (right after your prompt).
+  static Future<void> setAdIdentifiers({
+    required bool? trackingAllowed,
+    String? advertisingId,
+    String? metaAnonId,
+  }) async {
+    if (_instance._optedOut) return;
+    _instance._trackingKnown = true;
+    _instance._trackingAllowed = trackingAllowed;
+    if (advertisingId != null) {
+      _instance._advertisingIdTold = true;
+      _instance._advertisingId = _realId(advertisingId);
+    }
+    if (metaAnonId != null) {
+      final anon = metaAnonId.trim();
+      _instance._metaAnonId = anon.isEmpty ? null : (anon.length > 100 ? anon.substring(0, 100) : anon);
+    }
+    _instance._log('setAdIdentifiers', {'tracking_allowed': trackingAllowed});
+
+    // Before configure() they simply ride along with identify.
+    final campaignId = _instance._campaignId;
+    final deviceId = _instance._deviceId;
+    final queue = _instance._queue;
+    if (campaignId == null || deviceId == null || queue == null) return;
+    queue.enqueue('${_instance._apiUrl}/api/v1/mobile/ad-ids', {
+      'campaign_id': campaignId,
+      'device_id': deviceId,
+      ...await _instance._adIdentifiers(),
+    });
+  }
+
+  static final _adUuidRe = RegExp(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', caseSensitive: false);
+
+  /// A real advertising id, or null. Both platforms hand all zeros to a
+  /// person who said no, which is never sent.
+  static String? _realId(String value) {
+    final id = value.trim();
+    return _adUuidRe.hasMatch(id) && id != '00000000-0000-0000-0000-000000000000' ? id : null;
+  }
+
+  /// The ids as the server reads them (an absent key leaves what it stored,
+  /// a null clears it). Only what the person allowed: the IDFA only after
+  /// Allow, the IDFV only once the app said what the person answered and it
+  /// wasn't a no, since the SDK can't see that answer itself.
+  Future<Map<String, dynamic>> _adIdentifiers() async {
+    final out = <String, dynamic>{};
+    if (_trackingKnown) out['ad_tracking_allowed'] = _trackingAllowed;
+    if (Platform.isIOS) {
+      final idfa = _advertisingId;
+      if (idfa != null && _trackingAllowed == true) out['ad_id'] = idfa;
+      if (_trackingKnown && _trackingAllowed != false) {
+        final idfv = await _vendorId();
+        if (idfv != null) out['idfv'] = idfv;
+      }
+    } else if (Platform.isAndroid && _advertisingIdTold) {
+      out['ad_id'] = _advertisingId;
+    }
+    if (_metaAnonId != null) out['meta_anon_id'] = _metaAnonId;
+    try {
+      final package = (await PackageInfo.fromPlatform()).packageName;
+      if (package.isNotEmpty) out['app_package'] = package;
+    } catch (_) {}
+    return out;
+  }
+
+  /// Apple's identifier for vendor, or null (not iOS, or iOS has none yet
+  /// right after a restore).
+  Future<String?> _vendorId() async {
+    try {
+      final idfv = (await DeviceInfoPlugin().iosInfo).identifierForVendor;
+      return idfv == null ? null : _realId(idfv);
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// Internal debug logger. No-op unless debug=true was passed to
   /// configure(). Goes through dart:developer log() with name='Affiliateo'
   /// so it shows up cleanly in DevTools / IDE consoles and survives the
@@ -443,6 +619,7 @@ class Affiliateo with WidgetsBindingObserver {
     try {
       final deviceInfo = await _collectDeviceInfo();
       final installReferrer = await _getInstallReferrer();
+      final adIdentifiers = await _adIdentifiers();
 
       final response = await http.post(
         Uri.parse('$_apiUrl/api/v1/mobile/identify'),
@@ -459,6 +636,8 @@ class Affiliateo with WidgetsBindingObserver {
           'timezone': deviceInfo.timezone,
           'language': deviceInfo.language,
           if (installReferrer != null) 'install_referrer': installReferrer,
+          // Advertising ids (4.9.0): only what the person allowed, see _adIdentifiers.
+          ...adIdentifiers,
         }),
       );
 

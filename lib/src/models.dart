@@ -40,6 +40,20 @@ class IdentifyResponse {
   }
 }
 
+/// What a purchase reported with `Affiliateo.purchase` bought.
+enum PurchaseKind {
+  /// The first payment of a subscription.
+  subscription('subscription'),
+
+  /// A one-time purchase (lifetime access, a pack of credits).
+  oneTime('one_time');
+
+  const PurchaseKind(this.wireName);
+
+  /// The name the server reads.
+  final String wireName;
+}
+
 class AffiliateoState {
   final String? refCode;
   final bool isMatched;

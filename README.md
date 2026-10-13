@@ -11,7 +11,7 @@ dependencies:
   affiliateo:
     git:
       url: https://github.com/affiliateo/affiliateo-flutter
-      ref: 4.8.0
+      ref: 4.9.0
 ```
 
 Then run `flutter pub get`.
@@ -137,6 +137,62 @@ Notes:
   bound is rejected, so a tampered client cannot repoint a device at another
   customer.
 - No email or other PII is sent, same as `identify()`.
+
+## Report purchases to your ad networks
+
+When you run app campaigns on Meta, TikTok or Snapchat through Affiliateo,
+Affiliateo tells those networks each time somebody FIRST pays (a
+subscription's first charge, or a one-time purchase), so the campaigns learn
+who pays rather than who installs. Set it up in Affiliateo: your ad network's
+settings, **Send app sales**, then paste the network's id for your app.
+
+There are two ways a payment reaches Affiliateo, and you can use either or
+both. Affiliateo sends each payment once.
+
+1. **Your payment provider (nothing to add here).** If RevenueCat, Apple
+   In-App Purchase, Google Play or Adapty is connected to your app in
+   Affiliateo, first payments are reported on their own.
+2. **One line on your paywall.** Right after a purchase succeeds:
+
+```dart
+import 'package:purchases_flutter/purchases_flutter.dart';
+
+final result = await Purchases.purchase(PurchaseParams.package(package));
+Affiliateo.purchase(
+  transactionId: result.storeTransaction.transactionIdentifier,
+  productId: result.storeTransaction.productIdentifier,
+  price: package.storeProduct.price,
+  currency: package.storeProduct.currencyCode,
+);
+```
+
+`transactionId` is the store's id for the payment (the App Store transaction
+id, Google Play's order id), which RevenueCat's `transactionIdentifier` is on
+both. Pass `kind: PurchaseKind.oneTime` for a one-time purchase.
+
+The paywall line is quicker and carries the phone's network address, which
+the networks match on. It records no sale and moves no money: revenue and
+commissions still come only from your payment provider.
+
+**Advertising ids.** The SDK never shows the "Allow tracking?" prompt, and
+Dart can't reach the plugins that read the answer, so pass it in if your app
+asks (with `app_tracking_transparency`, for example). The advertising id then
+goes with Allow, and Apple's vendor id once the answer is known and isn't a
+no:
+
+```dart
+final status = await AppTrackingTransparency.trackingAuthorizationStatus;
+await Affiliateo.setAdIdentifiers(
+  trackingAllowed: status == TrackingStatus.authorized
+      ? true
+      : status == TrackingStatus.notDetermined ? null : false,
+  advertisingId: await AppTrackingTransparency.getAdvertisingIdentifier(),
+);
+```
+
+Pass `trackingAllowed: null` if your app never asks. On Android, pass
+whether ads personalisation is on and the Google advertising id, and add the
+`com.google.android.gms.permission.AD_ID` permission to your manifest.
 
 ## Requirements
 

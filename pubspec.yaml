@@ -1,5 +1,14 @@
 name: affiliateo
 description: Mobile affiliate attribution and session tracking for Flutter apps.
+# 4.9.0: Affiliateo.purchase(...) reports a purchase from the paywall so
+#   Affiliateo can send the app's first payments to Meta, TikTok and
+#   Snapchat (keyed by the store's transaction id, so a payment the payment
+#   provider also reports goes out once). setAdIdentifiers(...) hands over the
+#   tracking answer and advertising ids the app reads with its own plugins;
+#   identify carries them with the package name, and the IDFV once the app
+#   has said what the person answered. The plus plugins take ranges now, so
+#   the SDK installs next to purchases_flutter 9 and later. Additive: nothing
+#   existing changes.
 # 4.5.0: campaigns are now apps — configure(appId: ...) is the documented
 #   spelling; campaignId: ... still works (deprecated alias).
 # 4.4.1: RevenueCat docs now include affiliateo_visitor_id for every user
@@ -13,7 +22,7 @@ description: Mobile affiliate attribution and session tracking for Flutter apps.
 # paid-ad install (Meta / TikTok / Google Ads) gets its source labelled
 # server-side with zero merchant work. Additive, no API changes.
 # 3.0.0: event queue + reset/optOut/optIn/flush + TrackedScreen widget.
-version: 4.8.0
+version: 4.9.0
 homepage: https://affiliateo.com
 repository: https://github.com/affiliateo/affiliateo-flutter
 
@@ -25,13 +34,19 @@ dependencies:
   flutter:
     sdk: flutter
   http: ^1.1.0
-  device_info_plus: ^9.0.0
-  package_info_plus: ^5.0.0
+  # 4.9.0: ranges rather than one major each. ^9 and ^5 pinned the `web`
+  # package below 0.5, which no app on purchases_flutter 9 or later (or any
+  # current plus plugin) could resolve alongside. Every call this SDK makes
+  # on them is the same across these majors.
+  device_info_plus: ">=9.0.0 <14.0.0"
+  package_info_plus: ">=5.0.0 <11.0.0"
   shared_preferences: ^2.2.0
   # New in 3.0.0: needed by EventQueue to pause flushing when offline
   # and trigger an immediate retry when the network returns. Mirrors
   # @react-native-community/netinfo in the RN SDK.
-  connectivity_plus: ^5.0.0
+  # Both result shapes (one value before 6.0, a list since) are handled in
+  # EventQueue._updateConnectivity.
+  connectivity_plus: ">=5.0.0 <8.0.0"
   # New in 3.1.0: reads the Play Install Referrer (Android) so paid-ad
   # installs get their source labelled. Throws on iOS — guarded by a
   # Platform.isAndroid check.
