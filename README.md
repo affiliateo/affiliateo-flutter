@@ -85,7 +85,7 @@ ElevatedButton(
 ## RevenueCat Integration
 
 If you use RevenueCat, add the attributes manually after configure.
-`affiliateo_visitor_id` should be set for EVERY user (matched or organic) —
+`affiliateo_visitor_id` should be set for EVERY user (matched or organic):
 it links each purchase back to the tracked visitor, powering per-buyer spend,
 funnel journeys, and ad ROAS in your dashboard. `affiliateo_ref` only exists
 for affiliate-referred installs:
@@ -197,13 +197,28 @@ uses it only in its limited, privacy-safe way. On Android, pass
 whether ads personalisation is on and the Google advertising id, and add the
 `com.google.android.gms.permission.AD_ID` permission to your manifest.
 
-**Send each network your sales one way only.** If your app also reports
-purchases to Meta, TikTok or Snapchat with that network's own SDK (Meta's SDK
-does it by itself while its automatic purchase logging is on), turn that
-purchase reporting off, or leave **Send app sales** off for that network.
+**Installs come from the network's own SDK.** Affiliateo sends payments, not
+installs. To run app campaigns on Meta, TikTok or Snapchat, add that network's
+SDK (or a measurement partner like AppsFlyer) for installs, and keep **Send app
+sales** on for payments.
+
+**Send each network your sales one way only.** Keep that SDK's installs but turn
+its purchase reporting off, or leave **Send app sales** off for that network.
 Otherwise the network counts every sale twice: it only matches two reports of
 one sale when both carry the same id, and its own SDK doesn't send the store's
 transaction id. Affiliateo's own two ways are matched on it and go out once.
+
+- **Meta:** in your app on Meta for Developers, under Settings > Basic, set the
+  switch that logs in-app purchases automatically to No on the iOS and Android
+  cards. Leave the SDK's automatic logging on (`FacebookAutoLogAppEventsEnabled`
+  on iOS, `com.facebook.sdk.AutoLogAppEventsEnabled` on Android): turning it off
+  stops installs too.
+- **TikTok:** on iPhone, call `disablePaymentTracking()` on its `TikTokConfig`; on
+  Android, don't call `enableAutoIapTrack()` or `trackGooglePlayPurchase()`.
+- **Snapchat:** don't send purchases from its SDK.
+- **A measurement partner** (AppsFlyer, Adjust, Branch, Singular, Kochava) that
+  forwards purchases to the network counts too: stop forwarding them, or leave
+  **Send app sales** off for that network.
 
 ## Requirements
 
