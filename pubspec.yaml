@@ -1,5 +1,11 @@
 name: affiliateo
 description: Mobile affiliate attribution and session tracking for Flutter apps.
+# 4.10.0: every user gets the purchase tag (the Affiliateo visitor id), so
+#   sales from people who did not come through an affiliate are tied to their
+#   phone too. state.appAccountToken (iOS) and state.obfuscatedAccountId
+#   (Android) are now the visitor id for every device (they were only set for
+#   affiliate matches, from a per-affiliate tag the SDK minted and
+#   registered). Same names, no code changes in the app.
 # 4.9.0: Affiliateo.purchase(...) reports a purchase from the paywall so
 #   Affiliateo can send the app's first payments to Meta, TikTok and
 #   Snapchat (keyed by the store's transaction id, so a payment the payment
@@ -22,7 +28,7 @@ description: Mobile affiliate attribution and session tracking for Flutter apps.
 # paid-ad install (Meta / TikTok / Google Ads) gets its source labelled
 # server-side with zero merchant work. Additive, no API changes.
 # 3.0.0: event queue + reset/optOut/optIn/flush + TrackedScreen widget.
-version: 4.9.0
+version: 4.10.0
 homepage: https://affiliateo.com
 repository: https://github.com/affiliateo/affiliateo-flutter
 

@@ -541,7 +541,7 @@ class Affiliateo with WidgetsBindingObserver {
     final saved = prefs.getString('affiliateo_device_id');
     if (saved != null) return saved;
 
-    // RFC 4122 v4 UUID via the same generator used for the IAP tokens
+    // RFC 4122 v4 UUID via the same generator used for the event ids
     // below. The old microsecondsSinceEpoch + Object().hashCode scheme
     // had a non-zero collision risk for two devices minting fallback IDs
     // in the same microsecond, and Object().hashCode is bucketed (16-bit
@@ -645,33 +645,22 @@ class Affiliateo with WidgetsBindingObserver {
         final json = jsonDecode(response.body);
         final result = IdentifyResponse.fromJson(json);
 
-        // Apple native IAP attribution. Mint a stable UUID per
-        // (campaignId, refCode) so the customer's purchase chain (initial
-        // buy + every renewal + refund) all carry the same token Apple
-        // stamped at first purchase. Customer's purchase code reads it via
-        // Affiliateo.state.appAccountToken and passes it to their IAP
-        // plugin (in_app_purchase / flutter_inapp_purchase / etc.) as
-        // StoreKit's appAccountToken.
-        //
-        // Best-effort: registration failure here means the next launch
-        // retries (backend dedups via mobile_app_visitors unique constraint).
-        String? appleToken;
-        if (Platform.isIOS && result.refCode != null) {
-          appleToken = await _getOrMintAppleAccountToken(campaignId, result.refCode!);
-          // Fire-and-forget; don't block identify completion
-          unawaited(_registerAppleToken(campaignId, result.visitorId, appleToken));
-        }
-
-        // Google Play native attribution. Same UUID shape as Apple, different
-        // platform + endpoint. Customer reads it via
-        // Affiliateo.state.obfuscatedAccountId and passes it to in_app_purchase
-        // as PurchaseParam.applicationUserName (surfaces as obfuscatedAccountId
-        // on Android).
-        String? obfuscatedAccountId;
-        if (Platform.isAndroid && result.refCode != null) {
-          obfuscatedAccountId = await _getOrMintGoogleAccountId(campaignId, result.refCode!);
-          unawaited(_registerGoogleAccountId(campaignId, result.visitorId, obfuscatedAccountId));
-        }
+        // Native IAP attribution (4.10.0). The purchase tag is the visitor id
+        // itself, for EVERY device, matched or organic. The app reads it via
+        // Affiliateo.state.appAccountToken (iOS) or
+        // Affiliateo.state.obfuscatedAccountId (Android) and passes it to its
+        // IAP plugin (in_app_purchase's PurchaseParam.applicationUserName, or
+        // the equivalent): StoreKit's appAccountToken needs a UUID, which the
+        // visitor id is (v4), and Play's obfuscatedAccountId takes up to 64
+        // characters. The store stamps it onto the whole purchase chain (first
+        // buy, every renewal, refund) and the server matches it to this
+        // visitor directly, so nothing is registered from here. Tags minted
+        // per affiliate before 4.10.0 keep working server side, and a chain
+        // bought with one keeps carrying it.
+        final visitorId = result.visitorId;
+        final String? appleToken = Platform.isIOS && _isUuidV4(visitorId) ? visitorId : null;
+        final String? obfuscatedAccountId =
+            Platform.isAndroid && visitorId.isNotEmpty && visitorId.length <= 64 ? visitorId : null;
 
         _state = AffiliateoState(
           refCode: result.refCode,
@@ -702,63 +691,12 @@ class Affiliateo with WidgetsBindingObserver {
     }
   }
 
-  /// Get or mint a stable StoreKit 2 appAccountToken for this affiliate match.
-  /// Persisted in SharedPreferences keyed by (campaignId, refCode) so the same
-  /// UUID is reused across app launches for the same affiliate.
-  Future<String> _getOrMintAppleAccountToken(String campaignId, String refCode) async {
-    final prefs = await SharedPreferences.getInstance();
-    final key = 'affiliateo_apple_token:$campaignId:$refCode';
-    final existing = prefs.getString(key);
-    if (existing != null && _isUuidV4(existing)) return existing;
-    final fresh = _generateUuidV4();
-    await prefs.setString(key, fresh);
-    return fresh;
-  }
-
-  Future<void> _registerAppleToken(String campaignId, String visitorId, String token) async {
-    try {
-      await http.post(
-        Uri.parse('$_apiUrl/api/v1/mobile/apple-token'),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({
-          'campaign_id': campaignId,
-          'visitor_id': visitorId,
-          'token': token,
-        }),
-      );
-    } catch (_) {
-      // Best-effort: backend dedups so next launch retries safely.
-    }
-  }
-
-  /// Get or mint a stable Play Billing obfuscatedAccountId for this affiliate.
-  /// Persisted in SharedPreferences keyed by (campaignId, refCode) so the same
-  /// UUID is reused across launches.
-  Future<String> _getOrMintGoogleAccountId(String campaignId, String refCode) async {
-    final prefs = await SharedPreferences.getInstance();
-    final key = 'affiliateo_google_obfuscated_account_id:$campaignId:$refCode';
-    final existing = prefs.getString(key);
-    if (existing != null && _isUuidV4(existing)) return existing;
-    final fresh = _generateUuidV4();
-    await prefs.setString(key, fresh);
-    return fresh;
-  }
-
-  Future<void> _registerGoogleAccountId(String campaignId, String visitorId, String obfuscatedAccountId) async {
-    try {
-      await http.post(
-        Uri.parse('$_apiUrl/api/v1/mobile/google-account-id'),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({
-          'campaign_id': campaignId,
-          'visitor_id': visitorId,
-          'obfuscated_account_id': obfuscatedAccountId,
-        }),
-      );
-    } catch (_) {
-      // Best-effort: backend dedups so next launch retries safely.
-    }
-  }
+  // The per-affiliate tag minting (_getOrMintAppleAccountToken,
+  // _getOrMintGoogleAccountId) and its registration calls to
+  // /api/v1/mobile/apple-token and /api/v1/mobile/google-account-id used to
+  // live here. Since 4.10.0 the tag IS the visitor id, which the server
+  // already knows from identify, so there is nothing left to mint or
+  // register.
 
   // RFC 4122 v4 UUID. Dart doesn't ship a built-in UUID generator and we
   // don't want to add a transitive dep just for this, so we use the same

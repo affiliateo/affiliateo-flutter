@@ -60,20 +60,26 @@ class AffiliateoState {
   final bool isLoading;
   final String? visitorId;
 
-  /// StoreKit 2 appAccountToken UUID (iOS only). Pass this to your IAP
-  /// plugin's purchase call so Apple stamps it onto the transaction and our
-  /// webhook can resolve it back to the affiliate.
+  /// StoreKit appAccountToken UUID (iOS only): the Affiliateo visitor id of
+  /// this device. Every user gets one, whether or not they came through an
+  /// affiliate. Always pass it to your IAP plugin's purchase call
+  /// (in_app_purchase's PurchaseParam.applicationUserName), so Apple stamps it
+  /// onto the transaction and Affiliateo ties the sale (and every renewal and
+  /// refund after it) to this phone, and to the affiliate when there is one.
   ///
-  /// Null before identify completes, when the device isn't matched to any
-  /// affiliate, or on Android.
+  /// Null before identify succeeds (so also when the SDK starts opted out),
+  /// after reset(), and on Android.
   final String? appAccountToken;
 
-  /// Play Billing obfuscatedAccountId UUID (Android only). Pass this to your
-  /// IAP plugin's PurchaseParam (applicationUserName) so Google stamps it
-  /// onto the RTDN payloads our backend receives.
+  /// Play Billing obfuscatedAccountId (Android only): the Affiliateo visitor
+  /// id of this device. Every user gets one, whether or not they came through
+  /// an affiliate. Always pass it to your IAP plugin's purchase call
+  /// (in_app_purchase's PurchaseParam.applicationUserName), so Google stamps
+  /// it onto the purchase and Affiliateo ties the sale (and every renewal and
+  /// refund after it) to this phone, and to the affiliate when there is one.
   ///
-  /// Null before identify completes, when the device isn't matched to any
-  /// affiliate, or on iOS.
+  /// Null before identify succeeds (so also when the SDK starts opted out),
+  /// after reset(), and on iOS.
   final String? obfuscatedAccountId;
 
   const AffiliateoState({

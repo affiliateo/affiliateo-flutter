@@ -11,7 +11,7 @@ dependencies:
   affiliateo:
     git:
       url: https://github.com/affiliateo/affiliateo-flutter
-      ref: 4.9.0
+      ref: 4.10.0
 ```
 
 Then run `flutter pub get`.
@@ -75,12 +75,36 @@ ElevatedButton(
 )
 ```
 
+## Tag every purchase
+
+The SDK gives every phone a purchase tag (its Affiliateo visitor id):
+`Affiliateo.state.appAccountToken` on iPhone, `Affiliateo.state.obfuscatedAccountId`
+on Android. Every user gets one, whether or not they came through an affiliate,
+so always pass it to the purchase call. The store stamps it onto the sale and on
+every renewal and refund after it, and Affiliateo ties each one to this phone,
+and to the affiliate when there is one.
+
+```dart
+import 'dart:io';
+import 'package:in_app_purchase/in_app_purchase.dart';
+
+final state = Affiliateo.state;
+final param = PurchaseParam(
+  productDetails: productDetails,
+  applicationUserName:
+      Platform.isIOS ? state.appAccountToken : state.obfuscatedAccountId,
+);
+await InAppPurchase.instance.buyNonConsumable(purchaseParam: param);
+```
+
+It is null only until the SDK's first identify succeeds (and after `reset()`).
+
 ## What it does
 
 - **Identifies the device** using IDFV (iOS) or Android ID (no permissions needed)
 - **Tracks sessions** automatically (app foreground)
 - **Matches affiliate referrals** via fingerprint matching
-- **IAP attribution** via Apple `appAccountToken` and Google `obfuscatedAccountId`
+- **IAP attribution** via Apple `appAccountToken` and Google `obfuscatedAccountId`, for every user (see Tag every purchase)
 
 ## RevenueCat Integration
 
