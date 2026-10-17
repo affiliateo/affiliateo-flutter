@@ -39,3 +39,8 @@ jobs:
         # --fatal-infos would fail the run on style suggestions, which is a
         # different job from "is this code valid". Errors and warnings only.
         run: flutter analyze --no-fatal-infos
+
+      - name: Test
+        # Since 4.12.0: the email hash and the free access rules (the saved
+        # answer's 7 days and end date, the reply the server gives).
+        run: flutter test

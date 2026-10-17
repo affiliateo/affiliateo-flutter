@@ -11,7 +11,7 @@ dependencies:
   affiliateo:
     git:
       url: https://github.com/affiliateo/affiliateo-flutter
-      ref: 4.11.0
+      ref: 4.12.0
 ```
 
 Then run `flutter pub get`.
@@ -81,8 +81,8 @@ Say who is signed in after sign-in (and on launch while someone is), and call
 `logout()` on sign-out:
 
 ```dart
-// after sign-in
-await Affiliateo.identify(user.id);
+// after sign-in (email is optional, see Giving affiliates free access)
+await Affiliateo.identify(user.id, email: user.email);
 
 // on sign-out
 await Affiliateo.logout();
@@ -99,8 +99,17 @@ The SDK remembers the signed-in id and sends it again once per launch, and an
 `identify()` made before `configure()` has finished is kept and sent once it
 has. Ids that mean "nobody" (`"null"`, `"guest"`, `"0"`, an empty string,
 RevenueCat's `$RCAnonymousID:...`, anything over 128 characters) are skipped,
-and nothing is sent while the person has opted out. **user_id only:** no email
-or other PII.
+and nothing is sent while the person has opted out. **No email address is
+ever sent:** when you pass `email`, the SDK sends only its SHA-256 (see below),
+and nothing else about the person.
+
+### What changed in 4.12.0
+
+- `identify(userId, email: ...)` takes the signed-in person's email, for free
+  access. Only its SHA-256 leaves the phone.
+- New `Affiliateo.freeAccess()`, so apps that sell without RevenueCat can give
+  affiliates free access (see Giving affiliates free access).
+- New dependency: `crypto`, the Dart team's package, for the hash.
 
 ### What changed in 4.11.0
 
@@ -145,6 +154,45 @@ It is null only until the SDK's first identify succeeds. Signing out keeps it.
 - **Matches affiliate referrals** via fingerprint matching
 - **IAP attribution** via Apple `appAccountToken` and Google `obfuscatedAccountId`, for every user (see Tag every purchase)
 
+## Giving affiliates free access
+
+App owners can switch free access on for an individual affiliate from the
+Affiliates table in their Affiliateo dashboard, choosing a plan and, if they
+like, an end date. Apps on RevenueCat: see Giving affiliates free access on
+RevenueCat below instead.
+
+### Apps on StoreKit, Google Play Billing, Adapty or Stripe (4.12.0)
+
+Apple and Google have no way for anyone but the person to start a
+subscription, so your app asks Affiliateo instead and unlocks itself:
+
+```dart
+// after sign-in: pass the email the person signed in with
+await Affiliateo.identify(user.id, email: user.email);
+
+// wherever you decide what is unlocked (launch, paywall)
+final access = await Affiliateo.freeAccess();
+if (access.active) unlockPaidFeatures(access.productId); // null means full access
+```
+
+- `active`: unlock when true.
+- `productId`: the store product id of the plan the owner chose. `null` means
+  full access.
+- `expiresAt`: when the free access ends (UTC). `null` means no end date.
+
+The affiliate is recognised by email: the address the owner typed when
+switching it on, or else the one the affiliate uses on Affiliateo. **The
+address never leaves the phone.** The SDK sends only its SHA-256 (trimmed and
+lowercased first), and Affiliateo compares it with the same hash of the
+owner's address.
+
+`freeAccess()` never throws. It waits (up to 10 seconds) for `configure()` and
+the sign-in to reach Affiliateo first, so calling it right after `identify`
+works. Each answer is saved on the phone: when Affiliateo can't be reached,
+the saved one is used while its end date is still ahead and it is at most 7
+days old, otherwise the answer is no access. `logout()`, or a different user
+signing in, forgets it.
+
 ## RevenueCat Integration
 
 If you use RevenueCat, add the attributes manually after configure.
@@ -166,10 +214,10 @@ if (attributes.isNotEmpty) {
 }
 ```
 
-### Giving affiliates free access
+### Giving affiliates free access on RevenueCat
 
-App owners can switch complimentary access on for an individual affiliate from
-their Affiliateo dashboard, which grants a promotional entitlement in their own
+App owners can switch free access on for an individual affiliate from their
+Affiliateo dashboard, which grants a promotional entitlement in their own
 RevenueCat project. To make that possible, tell Affiliateo which RevenueCat
 customer this device is:
 
@@ -199,7 +247,7 @@ Notes:
 - Write-once per device. Sending a different ID for a device that is already
   bound is rejected, so a tampered client cannot repoint a device at another
   customer.
-- No email or other PII is sent, same as `identify()`.
+- No email or other PII is sent.
 
 ## Report purchases to your ad networks
 

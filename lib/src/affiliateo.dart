@@ -12,6 +12,7 @@ import 'package:device_info_plus/device_info_plus.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'free_access.dart';
 import 'models.dart';
 import 'queue.dart';
 
@@ -82,6 +83,24 @@ class Affiliateo with WidgetsBindingObserver {
   // A logout call on its way; a sign-in waits for it.
   Future<void>? _logoutInFlight;
 
+  // The signed-in user's email as a SHA-256 (4.12.0), never the address,
+  // kept with the user id so the once-per-launch re-send carries it too.
+  static const _emailHashKey = 'affiliateo_email_sha256';
+  // Mirrored in SharedPreferences; null when the app gave none.
+  String? _emailHash;
+  // The email hash the server confirmed along with _syncedUser.
+  String? _syncedEmailHash;
+  // configure() has read (or written) the stored sign-in.
+  bool _storedUserLoaded = false;
+  // Goes up on sign-out and when a different user signs in, so a free access
+  // answer for the person before is neither saved nor returned.
+  int _freeAccessEpoch = 0;
+  // What freeAccess() waits for: configure(), the sign-in sync after its
+  // identify, and the latest identify() or logout().
+  Future<void>? _launchWork;
+  Future<void>? _launchSync;
+  Future<void>? _signInWork;
+
   // Advertising ids the app handed over with setAdIdentifiers (4.9.0). Dart
   // can't reach the plugins that read them unless they are dependencies, so
   // the app reads them with its own and passes them in. `_trackingKnown`
@@ -114,8 +133,29 @@ class Affiliateo with WidgetsBindingObserver {
     bool debug = false,
     int flushIntervalMs = 5000,
     int maxQueueSize = 100,
+  }) {
+    final first = !_instance._configured;
+    final work = _configure(
+      appId: appId ?? campaignId,
+      apiUrl: apiUrl,
+      debug: debug,
+      flushIntervalMs: flushIntervalMs,
+      maxQueueSize: maxQueueSize,
+    );
+    // Kept for freeAccess() (4.12.0). _configure marks the SDK configured
+    // before its first await, so this is the call that is starting it.
+    if (first && _instance._configured) _instance._launchWork = work;
+    return work;
+  }
+
+  static Future<void> _configure({
+    String? appId,
+    required String apiUrl,
+    required bool debug,
+    required int flushIntervalMs,
+    required int maxQueueSize,
   }) async {
-    final resolvedAppId = appId ?? campaignId;
+    final resolvedAppId = appId;
     if (resolvedAppId == null) {
       developer.log('Missing appId — pass your app ID to Affiliateo.configure().', name: 'Affiliateo');
       return;
@@ -142,9 +182,11 @@ class Affiliateo with WidgetsBindingObserver {
       await _instance._saveUserState();
     } else {
       _instance._userId = _usableUserId(prefs.getString(_userIdKey));
+      _instance._emailHash = _instance._userId == null ? null : prefs.getString(_emailHashKey);
       _instance._logoutPending =
           _instance._userId == null && prefs.getString(_logoutPendingKey) == 'true';
     }
+    _instance._storedUserLoaded = true;
 
     // Get stable device ID
     _instance._deviceId = await _instance._getStableDeviceId();
@@ -217,14 +259,17 @@ class Affiliateo with WidgetsBindingObserver {
   /// that mean "nobody" ("null", "undefined", "guest", "0", RevenueCat's
   /// `$RCAnonymousID:...`).
   ///
-  /// user_id only. the SDK does NOT accept, collect, or transmit
-  /// email or any other PII. Never throws: analytics never breaks the
-  /// host app.
-  static Future<void> identify(String userId) async {
+  /// [email] (4.12.0, optional) is the address the person signed in with. It
+  /// never leaves the phone: the SDK sends only its SHA-256 (trimmed and
+  /// lowercased first), which is how an affiliate the app owner gave free
+  /// access is recognised (see [freeAccess]). Leave it out and the hash
+  /// already stored for this user is kept. Never throws: analytics never
+  /// breaks the host app.
+  static Future<void> identify(String userId, {String? email}) {
     final self = _instance;
     if (self._optedOut) {
       self._log('identify skipped: opted out');
-      return;
+      return Future.value();
     }
     final uid = _usableUserId(userId);
     if (uid == null) {
@@ -232,40 +277,77 @@ class Affiliateo with WidgetsBindingObserver {
         'identify skipped: not a user id (empty, over 128 characters, or a placeholder like "null", "guest" or "0")',
         {'user_id': userId},
       );
-      return;
+      return Future.value();
     }
-    self._userTouched = true;
-    final changed = self._userId != uid;
-    final hadPendingLogout = self._logoutPending;
-    self._userId = uid;
+    final work = self._signIn(uid, affiliateoEmailSha256(email));
+    self._signInWork = work;
+    return work;
+  }
+
+  Future<void> _signIn(String uid, String? hash) async {
+    // Before configure() has read the stored sign-in, compare with what is
+    // stored, so a launch that calls identify() early keeps its saved answer.
+    final loaded = _userTouched || _storedUserLoaded;
+    final prefs = loaded ? null : await _prefs();
+    final previousUser = loaded ? _userId : _usableUserId(prefs?.getString(_userIdKey));
+    final previousHash = loaded ? _emailHash : (previousUser == null ? null : prefs?.getString(_emailHashKey));
+
+    _userTouched = true;
+    final changed = _userId != uid;
+    final hadPendingLogout = _logoutPending;
+    final switched = previousUser != uid;
+    // Somebody else: their own email (or none). The same person: a new email,
+    // or the one stored.
+    final newHash = switched ? hash : (hash ?? previousHash);
+    final hashChanged = newHash != _emailHash;
+    _userId = uid;
+    _emailHash = newHash;
     // A sign-in replaces a sign-out that never reached the server: a
     // different person signing in switches the device anyway.
-    self._logoutPending = false;
-    if (changed || hadPendingLogout) await self._saveUserState();
+    _logoutPending = false;
+    if (switched) {
+      // No free access answer that belonged to the person before.
+      _freeAccessEpoch++;
+      await _clearFreeAccess();
+    }
+    if (changed || hadPendingLogout || hashChanged) await _saveUserState();
     // Already confirmed this launch: nothing to send.
-    if (self._syncedUser == uid) return;
+    if (_syncedUser == uid && _syncedEmailHash == _emailHash) return;
     // Before configure() has the device id: sent after its identify.
-    if (self._deviceId == null || self._campaignId == null) return;
-    await self._sendIdentifyUser(uid);
+    if (_deviceId == null || _campaignId == null) return;
+    await _sendIdentifyUser(uid);
   }
 
   /// The user signed out (4.11.0). Call it on sign-out: this device starts
   /// over as a new anonymous customer of the app, so whoever signs in next
   /// (or nobody) is not counted as the person who just left, and everything
-  /// already recorded stays with them. Forgets the stored user id.
+  /// already recorded stays with them. Forgets the stored user id, their
+  /// email hash and the saved free access answer.
   ///
   /// Tracking carries on: same device id, same visitor id, same purchase
   /// tag, nothing to restart. A sign-out made offline (or while opted out,
   /// or before [configure]) is sent after the next launch's identify.
-  static Future<void> logout() async {
+  static Future<void> logout() {
     final self = _instance;
     self._log('logout requested');
-    self._userTouched = true;
-    self._userId = null;
-    self._syncedUser = null;
-    self._logoutPending = true;
-    await self._saveUserState();
-    await self._sendLogout();
+    final work = self._signOut();
+    self._signInWork = work;
+    return work;
+  }
+
+  Future<void> _signOut() async {
+    _userTouched = true;
+    _userId = null;
+    _emailHash = null;
+    _syncedUser = null;
+    _syncedEmailHash = null;
+    _logoutPending = true;
+    // A freeAccess() that cannot reach the server must not unlock from the
+    // person who just left.
+    _freeAccessEpoch++;
+    await _clearFreeAccess();
+    await _saveUserState();
+    await _sendLogout();
   }
 
   /// Ids that mean "nobody". The server refuses them (400) because every
@@ -288,7 +370,8 @@ class Affiliateo with WidgetsBindingObserver {
     return id;
   }
 
-  /// Mirror the signed-in user and the pending sign-out to SharedPreferences.
+  /// Mirror the signed-in user, their email hash and the pending sign-out to
+  /// SharedPreferences.
   Future<void> _saveUserState() async {
     try {
       final prefs = await SharedPreferences.getInstance();
@@ -297,6 +380,12 @@ class Affiliateo with WidgetsBindingObserver {
         await prefs.setString(_userIdKey, uid);
       } else {
         await prefs.remove(_userIdKey);
+      }
+      final hash = _emailHash;
+      if (uid != null && hash != null) {
+        await prefs.setString(_emailHashKey, hash);
+      } else {
+        await prefs.remove(_emailHashKey);
       }
       if (_logoutPending) {
         await prefs.setString(_logoutPendingKey, 'true');
@@ -308,17 +397,122 @@ class Affiliateo with WidgetsBindingObserver {
     }
   }
 
-  /// POST to the API, or null when the network failed. Never throws.
-  Future<http.Response?> _postJson(String path, Map<String, dynamic> body) async {
+  /// POST to the API, or null when the network failed (or [timeout] passed).
+  /// Never throws.
+  Future<http.Response?> _postJson(String path, Map<String, dynamic> body, {Duration? timeout}) async {
     try {
-      return await http.post(
+      final sending = http.post(
         Uri.parse('$_apiUrl$path'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode(body),
       );
+      return await (timeout == null ? sending : sending.timeout(timeout));
     } catch (_) {
       return null;
     }
+  }
+
+  /// SharedPreferences, or null when storage is unavailable.
+  static Future<SharedPreferences?> _prefs() async {
+    try {
+      return await SharedPreferences.getInstance();
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Forget the saved free access answer.
+  Future<void> _clearFreeAccess() async {
+    try {
+      await (await _prefs())?.remove(FreeAccessCache.key);
+    } catch (_) {}
+  }
+
+  /// The saved free access answer while it is still good, else no access.
+  static Future<FreeAccess> _savedFreeAccess() async {
+    final prefs = await _prefs();
+    return FreeAccessCache.offlineAnswer(
+      FreeAccessCache.decode(prefs?.getString(FreeAccessCache.key)),
+      DateTime.now(),
+    );
+  }
+
+  /// Whether the app owner gave the signed-in person free access from their
+  /// Affiliateo dashboard (4.12.0). For apps that sell with StoreKit, Google
+  /// Play Billing, Adapty or Stripe directly, where Affiliateo cannot hand out
+  /// a subscription itself; apps on RevenueCat get a RevenueCat entitlement
+  /// instead and need none of this.
+  ///
+  /// ```dart
+  /// await Affiliateo.identify(user.id, email: user.email);
+  /// if ((await Affiliateo.freeAccess()).active) unlock();
+  /// ```
+  ///
+  /// The person is recognised by the email given to [identify], so call that
+  /// first; the check waits (up to 10 seconds) for [configure], this launch's
+  /// sign-in sync and the latest [identify] or [logout] to reach the server.
+  /// `productId` names the plan the owner chose (null means full access) and
+  /// `expiresAt` when it ends (null means no end).
+  ///
+  /// Never throws. Each answer is saved on the phone; when the server cannot
+  /// be reached (or the person has opted out, when nothing is sent, or
+  /// [configure] has not run) the saved answer is used while its end is still
+  /// ahead and it is at most 7 days old, otherwise the answer is no access.
+  /// Signing out, or a different user signing in, forgets the saved answer.
+  static Future<FreeAccess> freeAccess() async {
+    final self = _instance;
+    try {
+      await self._waitForSignIn(const Duration(seconds: 10));
+      final deviceId = self._deviceId;
+      final campaignId = self._campaignId;
+      if (self._optedOut || deviceId == null || campaignId == null) {
+        final saved = await _savedFreeAccess();
+        self._log('freeAccess: nothing sent (opted out or not configured), answered from the phone', {'active': saved.active});
+        return saved;
+      }
+      final epoch = self._freeAccessEpoch;
+      final response = await self._postJson(
+        '/api/v1/mobile/free-access',
+        {'campaign_id': campaignId, 'device_id': deviceId},
+        // An app may hold its paywall for this answer: past this the saved
+        // answer is used.
+        timeout: const Duration(seconds: 10),
+      );
+      // Signed out, or somebody else signed in, while this was asked.
+      if (epoch != self._freeAccessEpoch) return FreeAccess.inactive;
+      final ok = response != null && response.statusCode >= 200 && response.statusCode < 300;
+      final answer = ok ? FreeAccessCache.parseReply(response.body) : null;
+      if (answer == null) {
+        final saved = await _savedFreeAccess();
+        self._log('freeAccess failed, answered from the phone', {'http_status': response?.statusCode, 'active': saved.active});
+        return saved;
+      }
+      final prefs = await _prefs();
+      await prefs?.setString(FreeAccessCache.key, FreeAccessCache.encode(FreeAccessEntry.of(answer, DateTime.now())));
+      self._log('freeAccess', {'active': answer.active, 'product_id': answer.productId, 'expires_at': answer.expiresAt?.toIso8601String()});
+      return answer;
+    } catch (_) {
+      return FreeAccess.inactive;
+    }
+  }
+
+  /// Until configure(), the sign-in sync after its identify and the latest
+  /// identify() or logout() have finished, or [limit] passed.
+  Future<void> _waitForSignIn(Duration limit) async {
+    final deadline = DateTime.now().add(limit);
+    Future<void> upTo(Future<void>? work) async {
+      if (work == null) return;
+      final left = deadline.difference(DateTime.now());
+      if (left <= Duration.zero) return;
+      try {
+        await work.timeout(left);
+      } catch (_) {}
+    }
+
+    // One after the other: the sync only exists once configure() got to it.
+    await upTo(_launchWork);
+    await upTo(_launchSync);
+    await upTo(_signInWork);
   }
 
   /// The JSON object in a response body, or null.
@@ -334,13 +528,14 @@ class Affiliateo with WidgetsBindingObserver {
   /// POST /api/v1/mobile/identify-user for the signed-in user. A 400 is not
   /// retried (and the stored id is forgotten); a network or server error
   /// leaves it stored for the next launch; `linked: false` is sent once more
-  /// when this launch's first identify finished while it was on its way.
+  /// when this launch's first identify finished while it was on its way, and
+  /// a new email given while it was on its way is sent right after.
   Future<void> _sendIdentifyUser(String uid) async {
     // Already on its way: that call's answer decides what happens next.
     if (_userInFlight == uid) return;
     _userInFlight = uid;
     try {
-      for (var attempt = 0; attempt < 2; attempt++) {
+      for (var attempt = 0; attempt < 3; attempt++) {
         // A sign-out still on its way lands first, so it cannot undo this.
         final pendingLogout = _logoutInFlight;
         if (pendingLogout != null) await pendingLogout;
@@ -348,10 +543,13 @@ class Affiliateo with WidgetsBindingObserver {
         final campaignId = _campaignId;
         if (deviceId == null || campaignId == null || _optedOut || _userId != uid) return;
         final beforeFirstOpen = !_firstOpenDone;
+        final sentHash = _emailHash;
         final response = await _postJson('/api/v1/mobile/identify-user', {
           'campaign_id': campaignId,
           'device_id': deviceId,
           'user_id': uid,
+          // Left out when there is no email: the server keeps what it has.
+          if (sentHash != null) 'email_sha256': sentHash,
         });
         // Signed out, or somebody else signed in, while this was in flight.
         if (_userId != uid) return;
@@ -362,6 +560,7 @@ class Affiliateo with WidgetsBindingObserver {
         if (response.statusCode == 400) {
           _log('identify refused by the server (400), not retried', {'user_id': uid});
           _userId = null;
+          _emailHash = null;
           await _saveUserState();
           return;
         }
@@ -372,8 +571,11 @@ class Affiliateo with WidgetsBindingObserver {
         final json = _jsonMap(response.body);
         if (json == null || json['linked'] != false) {
           _syncedUser = uid;
-          _log('identify (user)', {'user_id': uid, 'outcome': json?['outcome']});
-          return;
+          _syncedEmailHash = sentHash;
+          _log('identify (user)', {'user_id': uid, 'outcome': json?['outcome'], 'email_sha256': sentHash});
+          // A new email came in while this was on its way.
+          if (_emailHash == sentHash) return;
+          continue;
         }
         if (!(beforeFirstOpen && _firstOpenDone)) {
           _log('identify: device not known yet, sent again after the first identify', {'user_id': uid});
@@ -421,7 +623,7 @@ class Affiliateo with WidgetsBindingObserver {
   Future<void> _syncSignedInUser() async {
     final uid = _userId;
     if (uid != null) {
-      if (_syncedUser != uid) await _sendIdentifyUser(uid);
+      if (_syncedUser != uid || _syncedEmailHash != _emailHash) await _sendIdentifyUser(uid);
     } else if (_logoutPending) {
       await _sendLogout();
     }
@@ -887,9 +1089,11 @@ class Affiliateo with WidgetsBindingObserver {
         });
 
         // The server knows this device now: bring it up to date on who is
-        // signed in.
+        // signed in. Kept so freeAccess() can wait for it.
         _firstOpenDone = true;
-        unawaited(_syncSignedInUser());
+        final sync = _syncSignedInUser();
+        _launchSync = sync;
+        unawaited(sync);
 
         // No RevenueCat auto-set here: Dart can't dynamically import
         // purchases_flutter, so the app developer sets the subscriber

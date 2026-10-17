@@ -1,5 +1,14 @@
 name: affiliateo
 description: Mobile affiliate attribution and session tracking for Flutter apps.
+# 4.12.0: free access for apps that sell without RevenueCat (StoreKit,
+#   Google Play Billing, Adapty, Stripe). identify(userId, email: ...) takes
+#   the signed-in person's email and sends only its SHA-256 (trimmed and
+#   lowercased first), never the address. New Affiliateo.freeAccess() asks
+#   whether the app owner gave that person free access and answers
+#   FreeAccess(active, productId, expiresAt); it never throws,
+#   saves each answer on the phone, and when offline uses the saved one while
+#   its end is ahead and it is at most 7 days old. logout() forgets it. New
+#   dependency: crypto (the Dart team's package) for the hash. First tests.
 # 4.11.0: sign-in and sign-out follow Affiliateo's customers (one person per
 #   app, the RevenueCat model). New Affiliateo.logout() for sign-out: the
 #   device starts over as anonymous and tracking carries on with the same
@@ -38,7 +47,7 @@ description: Mobile affiliate attribution and session tracking for Flutter apps.
 # paid-ad install (Meta / TikTok / Google Ads) gets its source labelled
 # server-side with zero merchant work. Additive, no API changes.
 # 3.0.0: event queue + reset/optOut/optIn/flush + TrackedScreen widget.
-version: 4.11.0
+version: 4.12.0
 homepage: https://affiliateo.com
 repository: https://github.com/affiliateo/affiliateo-flutter
 
@@ -67,3 +76,10 @@ dependencies:
   # installs get their source labelled. Throws on iOS — guarded by a
   # Platform.isAndroid check.
   android_play_install_referrer: ^0.4.0
+  # New in 4.12.0: SHA-256 of the signed-in person's email for free access.
+  # The Dart team's own package; Dart has no hash in its core libraries.
+  crypto: ^3.0.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter

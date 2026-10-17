@@ -40,6 +40,48 @@ class IdentifyResponse {
   }
 }
 
+/// What `Affiliateo.freeAccess()` answered (4.12.0): whether the app owner
+/// gave the signed-in person free access from their Affiliateo dashboard.
+///
+/// ```dart
+/// final access = await Affiliateo.freeAccess();
+/// if (access.active) unlock(access.productId);
+/// ```
+class FreeAccess {
+  /// Unlock the app when true.
+  final bool active;
+
+  /// The store product id of the plan the owner chose. Null means full access
+  /// (every paid feature).
+  final String? productId;
+
+  /// When the free access ends (UTC). Null means it has no end date.
+  final DateTime? expiresAt;
+
+  const FreeAccess({
+    required this.active,
+    this.productId,
+    this.expiresAt,
+  });
+
+  /// No free access.
+  static const inactive = FreeAccess(active: false);
+
+  @override
+  bool operator ==(Object other) =>
+      other is FreeAccess &&
+      other.active == active &&
+      other.productId == productId &&
+      other.expiresAt == expiresAt;
+
+  @override
+  int get hashCode => Object.hash(active, productId, expiresAt);
+
+  @override
+  String toString() =>
+      'FreeAccess(active: $active, productId: $productId, expiresAt: $expiresAt)';
+}
+
 /// What a purchase reported with `Affiliateo.purchase` bought.
 enum PurchaseKind {
   /// The first payment of a subscription.
