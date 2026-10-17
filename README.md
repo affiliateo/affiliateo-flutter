@@ -11,7 +11,7 @@ dependencies:
   affiliateo:
     git:
       url: https://github.com/affiliateo/affiliateo-flutter
-      ref: 4.10.0
+      ref: 4.11.0
 ```
 
 Then run `flutter pub get`.
@@ -75,6 +75,45 @@ ElevatedButton(
 )
 ```
 
+## Sign-in and sign-out
+
+Say who is signed in after sign-in (and on launch while someone is), and call
+`logout()` on sign-out:
+
+```dart
+// after sign-in
+await Affiliateo.identify(user.id);
+
+// on sign-out
+await Affiliateo.logout();
+```
+
+The same person then counts as one customer across their devices. After
+`logout()` the phone counts as a new anonymous customer, so whoever signs in
+next (or nobody) isn't counted as the person who just left; everything already
+recorded stays with them. Tracking carries on as before: same device, same
+visitor id, same purchase tag, no restart needed. If a different user signs in
+without a sign-out in between, the phone switches to them on its own.
+
+The SDK remembers the signed-in id and sends it again once per launch, and an
+`identify()` made before `configure()` has finished is kept and sent once it
+has. Ids that mean "nobody" (`"null"`, `"guest"`, `"0"`, an empty string,
+RevenueCat's `$RCAnonymousID:...`, anything over 128 characters) are skipped,
+and nothing is sent while the person has opted out. **user_id only:** no email
+or other PII.
+
+### What changed in 4.11.0
+
+- New `logout()`, for sign-out (see above).
+- `reset()` is now the same as `logout()`. It used to try to give the phone a
+  new device id, which iOS and Android don't allow, and left the purchase tag
+  null until the app restarted.
+- `identify()` stores the id, re-sends it once per launch, keeps a call made
+  before `configure()` finished (it used to be dropped), retries a sign-in
+  that raced ahead of the first launch call, and skips placeholder ids.
+- A different user signing in on the same phone now switches it to them. It
+  used to be refused, so a shared phone stayed its first user forever.
+
 ## Tag every purchase
 
 The SDK gives every phone a purchase tag (its Affiliateo visitor id):
@@ -97,7 +136,7 @@ final param = PurchaseParam(
 await InAppPurchase.instance.buyNonConsumable(purchaseParam: param);
 ```
 
-It is null only until the SDK's first identify succeeds (and after `reset()`).
+It is null only until the SDK's first identify succeeds. Signing out keeps it.
 
 ## What it does
 

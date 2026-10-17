@@ -67,8 +67,8 @@ class AffiliateoState {
   /// onto the transaction and Affiliateo ties the sale (and every renewal and
   /// refund after it) to this phone, and to the affiliate when there is one.
   ///
-  /// Null before identify succeeds (so also when the SDK starts opted out),
-  /// after reset(), and on Android.
+  /// Null before identify succeeds (so also when the SDK starts opted out)
+  /// and on Android. Since 4.11.0 logout() and reset() keep it.
   final String? appAccountToken;
 
   /// Play Billing obfuscatedAccountId (Android only): the Affiliateo visitor
@@ -78,8 +78,8 @@ class AffiliateoState {
   /// it onto the purchase and Affiliateo ties the sale (and every renewal and
   /// refund after it) to this phone, and to the affiliate when there is one.
   ///
-  /// Null before identify succeeds (so also when the SDK starts opted out),
-  /// after reset(), and on iOS.
+  /// Null before identify succeeds (so also when the SDK starts opted out)
+  /// and on iOS. Since 4.11.0 logout() and reset() keep it.
   final String? obfuscatedAccountId;
 
   const AffiliateoState({

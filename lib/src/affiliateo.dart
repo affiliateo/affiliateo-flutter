@@ -59,6 +59,29 @@ class Affiliateo with WidgetsBindingObserver {
   static const _optOutKey = 'affiliateo_opt_out';
   bool _optedOut = false;
 
+  // Who is signed in (4.11.0), kept in SharedPreferences so the SDK can
+  // re-send it once per launch, and a sign-out the server has not heard yet.
+  // Same key names as the React Native, Swift and Kotlin SDKs.
+  static const _userIdKey = 'affiliateo_user_id';
+  static const _logoutPendingKey = 'affiliateo_logout_pending';
+  // The signed-in user id, mirrored in SharedPreferences.
+  String? _userId;
+  // A sign-out the server has not heard yet (offline, opted out, or made
+  // before configure() finished).
+  bool _logoutPending = false;
+  // identify() or logout() ran before configure() read the stored values.
+  bool _userTouched = false;
+  // This launch's first /api/v1/mobile/identify succeeded, so a sign-in can
+  // link to the device.
+  bool _firstOpenDone = false;
+  // The user the server confirmed (linked) this launch: identify with the
+  // same id sends nothing.
+  String? _syncedUser;
+  // The user id whose identify-user call is on its way.
+  String? _userInFlight;
+  // A logout call on its way; a sign-in waits for it.
+  Future<void>? _logoutInFlight;
+
   // Advertising ids the app handed over with setAdIdentifiers (4.9.0). Dart
   // can't reach the plugins that read them unless they are dependencies, so
   // the app reads them with its own and passes them in. `_trackingKnown`
@@ -111,6 +134,17 @@ class Affiliateo with WidgetsBindingObserver {
     // persistence.
     final prefs = await SharedPreferences.getInstance();
     _instance._optedOut = prefs.getString(_optOutKey) == 'true';
+
+    // Who was signed in at the end of the last launch, and a sign-out the
+    // server never heard. An identify() or logout() made before this point
+    // wins, except a sign-in while opted out, which does nothing.
+    if (_instance._userTouched && !(_instance._optedOut && _instance._userId != null)) {
+      await _instance._saveUserState();
+    } else {
+      _instance._userId = _usableUserId(prefs.getString(_userIdKey));
+      _instance._logoutPending =
+          _instance._userId == null && prefs.getString(_logoutPendingKey) == 'true';
+    }
 
     // Get stable device ID
     _instance._deviceId = await _instance._getStableDeviceId();
@@ -170,38 +204,226 @@ class Affiliateo with WidgetsBindingObserver {
     });
   }
 
-  /// Link this anonymous device install to a merchant user_id so the
-  /// funnel can stitch the same person across devices, reinstalls,
-  /// and the anonymous to logged-in handoff. Call once after sign-in.
-  /// Idempotent: safe to call on every app launch when a user is
-  /// signed in.
+  /// Say who is signed in. Call after sign-in, and on launch while someone
+  /// is signed in. The same person then counts as ONE customer across
+  /// devices, reinstalls, and the anonymous to signed-in handoff. A different
+  /// user signing in on this device switches it to them (since 4.11.0; it
+  /// used to be refused).
+  ///
+  /// The SDK stores the id and re-sends it once per launch; called before
+  /// [configure] has finished, it is kept and sent right after configure's
+  /// identify. A sign-in that raced ahead of the launch's first identify is
+  /// sent again right after it. Does nothing while opted out, and skips ids
+  /// that mean "nobody" ("null", "undefined", "guest", "0", RevenueCat's
+  /// `$RCAnonymousID:...`).
   ///
   /// user_id only. the SDK does NOT accept, collect, or transmit
-  /// email or any other PII. Best-effort: network failures are
-  /// swallowed so analytics never breaks the host app.
+  /// email or any other PII. Never throws: analytics never breaks the
+  /// host app.
   static Future<void> identify(String userId) async {
-    if (_instance._optedOut) return;
-    final cleanId = userId.trim();
-    if (cleanId.isEmpty || cleanId.length > 128) return;
-    final deviceId = _instance._deviceId;
-    final campaignId = _instance._campaignId;
-    if (deviceId == null || campaignId == null) return;
-    _instance._log('identify (user)', {'user_id': cleanId});
+    final self = _instance;
+    if (self._optedOut) {
+      self._log('identify skipped: opted out');
+      return;
+    }
+    final uid = _usableUserId(userId);
+    if (uid == null) {
+      self._log(
+        'identify skipped: not a user id (empty, over 128 characters, or a placeholder like "null", "guest" or "0")',
+        {'user_id': userId},
+      );
+      return;
+    }
+    self._userTouched = true;
+    final changed = self._userId != uid;
+    final hadPendingLogout = self._logoutPending;
+    self._userId = uid;
+    // A sign-in replaces a sign-out that never reached the server: a
+    // different person signing in switches the device anyway.
+    self._logoutPending = false;
+    if (changed || hadPendingLogout) await self._saveUserState();
+    // Already confirmed this launch: nothing to send.
+    if (self._syncedUser == uid) return;
+    // Before configure() has the device id: sent after its identify.
+    if (self._deviceId == null || self._campaignId == null) return;
+    await self._sendIdentifyUser(uid);
+  }
 
-    final body = <String, dynamic>{
-      'campaign_id': campaignId,
-      'device_id': deviceId,
-      'user_id': cleanId,
-    };
+  /// The user signed out (4.11.0). Call it on sign-out: this device starts
+  /// over as a new anonymous customer of the app, so whoever signs in next
+  /// (or nobody) is not counted as the person who just left, and everything
+  /// already recorded stays with them. Forgets the stored user id.
+  ///
+  /// Tracking carries on: same device id, same visitor id, same purchase
+  /// tag, nothing to restart. A sign-out made offline (or while opted out,
+  /// or before [configure]) is sent after the next launch's identify.
+  static Future<void> logout() async {
+    final self = _instance;
+    self._log('logout requested');
+    self._userTouched = true;
+    self._userId = null;
+    self._syncedUser = null;
+    self._logoutPending = true;
+    await self._saveUserState();
+    await self._sendLogout();
+  }
 
+  /// Ids that mean "nobody". The server refuses them (400) because every
+  /// stranger whose app sent one would become one person. KEEP IN SYNC with
+  /// src/lib/customers/user-id.ts in the Affiliateo web repo.
+  static const _notAUser = <String>{
+    'null', '(null)', '<null>', 'nil', 'none', 'no', 'undefined', 'unidentified',
+    'unknown', 'anonymous', 'anon', 'guest', 'nan', 'false', 'true',
+    '0', '-1', '[]', '{}', '[object object]',
+  };
+
+  /// The trimmed id when it can name a person, otherwise null.
+  static String? _usableUserId(String? value) {
+    if (value == null) return null;
+    final id = value.trim();
+    if (id.isEmpty || id.length > 128) return null;
+    if (_notAUser.contains(id.toLowerCase())) return null;
+    // RevenueCat's own anonymous id names an install, not a user.
+    if (id.startsWith(r'$RCAnonymousID:')) return null;
+    return id;
+  }
+
+  /// Mirror the signed-in user and the pending sign-out to SharedPreferences.
+  Future<void> _saveUserState() async {
     try {
-      await http.post(
-        Uri.parse('${_instance._apiUrl}/api/v1/mobile/identify-user'),
+      final prefs = await SharedPreferences.getInstance();
+      final uid = _userId;
+      if (uid != null) {
+        await prefs.setString(_userIdKey, uid);
+      } else {
+        await prefs.remove(_userIdKey);
+      }
+      if (_logoutPending) {
+        await prefs.setString(_logoutPendingKey, 'true');
+      } else {
+        await prefs.remove(_logoutPendingKey);
+      }
+    } catch (_) {
+      // Storage unavailable: only the once-per-launch re-send is lost.
+    }
+  }
+
+  /// POST to the API, or null when the network failed. Never throws.
+  Future<http.Response?> _postJson(String path, Map<String, dynamic> body) async {
+    try {
+      return await http.post(
+        Uri.parse('$_apiUrl$path'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode(body),
       );
     } catch (_) {
-      // Swallow. analytics never throws in the host app.
+      return null;
+    }
+  }
+
+  /// The JSON object in a response body, or null.
+  static Map<String, dynamic>? _jsonMap(String body) {
+    try {
+      final decoded = jsonDecode(body);
+      return decoded is Map<String, dynamic> ? decoded : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// POST /api/v1/mobile/identify-user for the signed-in user. A 400 is not
+  /// retried (and the stored id is forgotten); a network or server error
+  /// leaves it stored for the next launch; `linked: false` is sent once more
+  /// when this launch's first identify finished while it was on its way.
+  Future<void> _sendIdentifyUser(String uid) async {
+    // Already on its way: that call's answer decides what happens next.
+    if (_userInFlight == uid) return;
+    _userInFlight = uid;
+    try {
+      for (var attempt = 0; attempt < 2; attempt++) {
+        // A sign-out still on its way lands first, so it cannot undo this.
+        final pendingLogout = _logoutInFlight;
+        if (pendingLogout != null) await pendingLogout;
+        final deviceId = _deviceId;
+        final campaignId = _campaignId;
+        if (deviceId == null || campaignId == null || _optedOut || _userId != uid) return;
+        final beforeFirstOpen = !_firstOpenDone;
+        final response = await _postJson('/api/v1/mobile/identify-user', {
+          'campaign_id': campaignId,
+          'device_id': deviceId,
+          'user_id': uid,
+        });
+        // Signed out, or somebody else signed in, while this was in flight.
+        if (_userId != uid) return;
+        if (response == null) {
+          _log('identify failed (network), sent again next launch', {'user_id': uid});
+          return;
+        }
+        if (response.statusCode == 400) {
+          _log('identify refused by the server (400), not retried', {'user_id': uid});
+          _userId = null;
+          await _saveUserState();
+          return;
+        }
+        if (response.statusCode < 200 || response.statusCode >= 300) {
+          _log('identify failed, sent again next launch', {'user_id': uid, 'http_status': response.statusCode});
+          return;
+        }
+        final json = _jsonMap(response.body);
+        if (json == null || json['linked'] != false) {
+          _syncedUser = uid;
+          _log('identify (user)', {'user_id': uid, 'outcome': json?['outcome']});
+          return;
+        }
+        if (!(beforeFirstOpen && _firstOpenDone)) {
+          _log('identify: device not known yet, sent again after the first identify', {'user_id': uid});
+          return;
+        }
+        _log('identify: device known now, sending again', {'user_id': uid});
+      }
+    } finally {
+      if (_userInFlight == uid) _userInFlight = null;
+    }
+  }
+
+  /// POST /api/v1/mobile/logout. The pending flag is cleared only once the
+  /// server has it; until then the next launch sends it again.
+  Future<void> _sendLogout() async {
+    final deviceId = _deviceId;
+    final campaignId = _campaignId;
+    if (deviceId == null || campaignId == null || _optedOut) return;
+    final sending = _postLogout(campaignId, deviceId);
+    _logoutInFlight = sending;
+    await sending;
+    if (identical(_logoutInFlight, sending)) _logoutInFlight = null;
+  }
+
+  Future<void> _postLogout(String campaignId, String deviceId) async {
+    final response = await _postJson('/api/v1/mobile/logout', {
+      'campaign_id': campaignId,
+      'device_id': deviceId,
+    });
+    if (response != null && response.statusCode >= 200 && response.statusCode < 300) {
+      _log('logout', {'outcome': _jsonMap(response.body)?['outcome']});
+      // Nobody signed in meanwhile (a sign-in clears the flag itself).
+      if (_userId == null) {
+        _logoutPending = false;
+        await _saveUserState();
+      }
+    } else {
+      _log('logout failed, sent again next launch', {'http_status': response?.statusCode});
+    }
+  }
+
+  /// After this launch's first identify: the stored user if the server has
+  /// not confirmed it yet (which also covers a sign-in that answered
+  /// `linked: false`), or a sign-out it never heard.
+  Future<void> _syncSignedInUser() async {
+    final uid = _userId;
+    if (uid != null) {
+      if (_syncedUser != uid) await _sendIdentifyUser(uid);
+    } else if (_logoutPending) {
+      await _sendLogout();
     }
   }
 
@@ -254,23 +476,11 @@ class Affiliateo with WidgetsBindingObserver {
     }
   }
 
-  /// Wipe the device identity. Drains pending events first (they land
-  /// server-side under the OLD device_id which is correct), then clears
-  /// the queue, regenerates the device_id, and resets state. Call on
-  /// app logout when a different user might sign in afterwards.
-  static Future<void> reset() async {
-    _instance._log('reset');
-    await _instance._queue?.flush();
-    await _instance._queue?.clear();
-    // Clear the persisted UUID fallback so the next getStableDeviceId
-    // call mints fresh. The platform IDFV / androidId is tied to the
-    // install and can't be changed; only the UUID fallback gets fresh
-    // entropy.
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.remove('affiliateo_device_id');
-    _instance._deviceId = await _instance._getStableDeviceId();
-    _state = const AffiliateoState(isLoading: false);
-  }
+  /// The same as [logout] since 4.11.0. It used to try to mint a new device
+  /// id (the IDFV / Android ID cannot be changed) and cleared the state,
+  /// which left the purchase tag null until the app restarted. Kept so
+  /// existing apps keep compiling and now get the sign-out they meant.
+  static Future<void> reset() => logout();
 
   /// Stop tracking on this device. Sets a persistent opt-out flag in
   /// SharedPreferences and silences ALL subsequent page / track /
@@ -675,6 +885,11 @@ class Affiliateo with WidgetsBindingObserver {
           'matched': result.matched,
           'ref': result.refCode,
         });
+
+        // The server knows this device now: bring it up to date on who is
+        // signed in.
+        _firstOpenDone = true;
+        unawaited(_syncSignedInUser());
 
         // No RevenueCat auto-set here: Dart can't dynamically import
         // purchases_flutter, so the app developer sets the subscriber
