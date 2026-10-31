@@ -11,7 +11,7 @@ dependencies:
   affiliateo:
     git:
       url: https://github.com/affiliateo/affiliateo-flutter
-      ref: 4.15.5
+      ref: 4.16.0
 ```
 
 Then run `flutter pub get`.
@@ -103,7 +103,7 @@ and nothing is sent while the person has opted out. **No email address is
 ever sent:** when you pass `email`, the SDK sends only its SHA-256 (see below),
 and nothing else about the person.
 
-### What changed (not released yet)
+### What changed in 4.16.0
 
 - Switching Live Chat off in your dashboard, or someone on your team going
   online or offline, reaches the bubble at once while the app is open: off,
