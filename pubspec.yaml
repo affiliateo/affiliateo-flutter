@@ -1,5 +1,9 @@
 name: affiliateo
 description: Mobile affiliate attribution, session tracking and Live Chat for Flutter apps.
+# 4.15.5: the app's own sheets, dialogs and full-screen pop-ups cover the
+#   chat bubble, as in the other SDKs (it used to float over them): on the
+#   app's main navigator or a navigator inside the page on top (a tab's own),
+#   and the bubble is back once they have slid away.
 # 4.15.4: catches up with the Swift, Kotlin and React Native SDKs (the
 #   numbers 4.13 to 4.15.3 were never used here).
 #   Live Chat: the app's users chat with the business, which answers from
@@ -64,7 +68,7 @@ description: Mobile affiliate attribution, session tracking and Live Chat for Fl
 # paid-ad install (Meta / TikTok / Google Ads) gets its source labelled
 # server-side with zero merchant work. Additive, no API changes.
 # 3.0.0: event queue + reset/optOut/optIn/flush + TrackedScreen widget.
-version: 4.15.4
+version: 4.15.5
 homepage: https://affiliateo.com
 repository: https://github.com/affiliateo/affiliateo-flutter
 

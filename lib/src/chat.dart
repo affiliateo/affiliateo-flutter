@@ -7,6 +7,7 @@ import 'dart:math';
 import 'dart:ui' show Brightness, PlatformDispatcher;
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
@@ -182,6 +183,43 @@ NavigatorState? _navigatorFor(BuildContext context) {
   }
 
   context.visitChildElements(visit);
+  return found;
+}
+
+/// A route that covers the bubble, as sheets, dialogs and full-screen
+/// pop-ups do in the other SDKs: the bubble is for the app's pages.
+bool _coversBubble(Route<Object?> route) =>
+    route is PopupRoute || (route is PageRoute && route.fullscreenDialog);
+
+/// The sheet, dialog or full-screen pop-up on top of [navigator], or of a
+/// navigator inside its top page (a tab's own navigator), or null.
+ModalRoute<Object?>? _coverOn(NavigatorState navigator) {
+  if (!navigator.mounted) return null;
+  Route<Object?>? top;
+  // Reads the top route: answering true at once pops nothing.
+  navigator.popUntil((route) {
+    top = route;
+    return true;
+  });
+  final page = top;
+  if (page is! ModalRoute<Object?>) return null;
+  if (_coversBubble(page)) return page;
+  final pageContext = page.subtreeContext;
+  if (pageContext == null) return null;
+  ModalRoute<Object?>? found;
+  void visit(Element element) {
+    if (found != null) return;
+    // A tab that isn't showing, its navigator included.
+    final widget = element.widget;
+    if (widget is Offstage && widget.offstage) return;
+    if (element is StatefulElement && element.state is NavigatorState) {
+      found = _coverOn(element.state as NavigatorState);
+      return;
+    }
+    element.visitChildren(visit);
+  }
+
+  pageContext.visitChildElements(visit);
   return found;
 }
 
@@ -924,6 +962,16 @@ class _AffiliateoChatState extends State<AffiliateoChat> {
   final LiveChat _chat = LiveChat.instance;
   late final Listenable _changes = Listenable.merge([_chat, _chat.screen]);
 
+  /// Every bubble on screen, checked after each frame for a sheet over it.
+  static final Set<_AffiliateoChatState> _shown = {};
+  static bool _watching = false;
+
+  /// The app's own sheet, dialog or full-screen pop-up while it shows,
+  /// sliding away included: the bubble hides under it, as in the other SDKs
+  /// where those cover it. The bubble sits above the app's navigator, so it
+  /// looks after each frame (frames run while a sheet opens or closes).
+  ModalRoute<Object?>? _cover;
+
   /// Where the person left it: its distance from the right and bottom edges.
   Offset? _dragged;
   Offset _start = Offset.zero;
@@ -946,6 +994,32 @@ class _AffiliateoChatState extends State<AffiliateoChat> {
     super.initState();
     _chat.widgetLook = _look;
     _chat.want();
+    _shown.add(this);
+    if (!_watching) {
+      _watching = true;
+      SchedulerBinding.instance.addPersistentFrameCallback((_) {
+        for (final bubble in _shown.toList()) {
+          bubble._checkCover();
+        }
+      });
+    }
+  }
+
+  void _checkCover() {
+    if (!mounted) return;
+    final navigator = widget.navigatorKey?.currentState ?? _navigatorFor(context);
+    var cover = navigator == null ? null : _coverOn(navigator);
+    final last = _cover;
+    // Closed: still covering while it slides away.
+    if (cover == null && last != null && !last.isActive && last.animation?.status != AnimationStatus.dismissed) {
+      cover = last;
+    }
+    if (identical(cover, last)) return;
+    _cover = cover;
+    if ((cover == null) == (last == null)) return;
+    SchedulerBinding.instance.addPostFrameCallback((_) {
+      if (mounted) setState(() {});
+    });
   }
 
   @override
@@ -956,6 +1030,7 @@ class _AffiliateoChatState extends State<AffiliateoChat> {
 
   @override
   void dispose() {
+    _shown.remove(this);
     _chat.widgetLook = const ChatLook();
     super.dispose();
   }
@@ -1001,6 +1076,7 @@ class _AffiliateoChatState extends State<AffiliateoChat> {
     final state = _chat.state.value;
     final bubble = applyChatLook(state.enabled ? _chat.dashboardBubble : const ChatBubbleConfig(), _look);
     if (!widget.visible ||
+        _cover != null ||
         !state.showBubble ||
         state.isOpen ||
         !bubbleShowsOn(bubble.pageMode, bubble.pageRules, _chat.screen.value)) {

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:affiliateo/affiliateo.dart';
 import 'package:affiliateo/src/chat.dart';
 import 'package:affiliateo/src/chat_rules.dart';
@@ -74,5 +76,102 @@ void main() {
     expect(tester.getTopLeft(bubble), const Offset(20, 20));
     expect(tester.takeException(), isNull);
     semantics.dispose();
+  });
+
+  group('the app\'s own sheets and pop-ups cover it', () {
+    PageRoute<T> page<T>(RouteSettings settings, WidgetBuilder builder) => PageRouteBuilder<T>(
+          settings: settings,
+          pageBuilder: (context, _, __) => builder(context),
+        );
+
+    Widget withNavigator(Widget home) => WidgetsApp(
+          color: const Color(0xFF000000),
+          pageRouteBuilder: page,
+          home: home,
+          builder: (context, child) => AffiliateoChat(child: child!),
+        );
+
+    Future<void> openDialog(BuildContext context, {bool root = true}) => showGeneralDialog<void>(
+          context: context,
+          useRootNavigator: root,
+          transitionDuration: const Duration(milliseconds: 200),
+          pageBuilder: (context, _, __) => const SizedBox(width: 100, height: 100),
+        );
+
+    testWidgets('a dialog or sheet hides it until it has slid away', (tester) async {
+      final semantics = tester.ensureSemantics();
+      chat.debugAnswer();
+      late BuildContext home;
+      await tester.pumpWidget(withNavigator(Builder(builder: (context) {
+        home = context;
+        return const SizedBox.expand();
+      })));
+      await tester.pump();
+      expect(find.bySemanticsLabel('Chat'), findsOneWidget);
+
+      unawaited(openDialog(home));
+      await tester.pump();
+      await tester.pump();
+      expect(find.bySemanticsLabel('Chat'), findsNothing);
+      await tester.pumpAndSettle();
+      expect(find.bySemanticsLabel('Chat'), findsNothing);
+
+      Navigator.of(home).pop();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 50));
+      // Still sliding away: still covered.
+      expect(find.bySemanticsLabel('Chat'), findsNothing);
+      await tester.pumpAndSettle();
+      expect(find.bySemanticsLabel('Chat'), findsOneWidget);
+      semantics.dispose();
+    });
+
+    testWidgets('a full-screen pop-up covers it, a plain page does not', (tester) async {
+      final semantics = tester.ensureSemantics();
+      chat.debugAnswer();
+      late BuildContext home;
+      await tester.pumpWidget(withNavigator(Builder(builder: (context) {
+        home = context;
+        return const SizedBox.expand();
+      })));
+      unawaited(Navigator.of(home).push(PageRouteBuilder<void>(pageBuilder: (_, __, ___) => const SizedBox.expand())));
+      await tester.pumpAndSettle();
+      expect(find.bySemanticsLabel('Chat'), findsOneWidget);
+      Navigator.of(home).pop();
+      await tester.pumpAndSettle();
+
+      unawaited(Navigator.of(home).push(PageRouteBuilder<void>(
+        fullscreenDialog: true,
+        pageBuilder: (_, __, ___) => const SizedBox.expand(),
+      )));
+      await tester.pumpAndSettle();
+      expect(find.bySemanticsLabel('Chat'), findsNothing);
+      Navigator.of(home).pop();
+      await tester.pumpAndSettle();
+      expect(find.bySemanticsLabel('Chat'), findsOneWidget);
+      semantics.dispose();
+    });
+
+    testWidgets('a sheet on a tab\'s own navigator covers it too', (tester) async {
+      final semantics = tester.ensureSemantics();
+      chat.debugAnswer();
+      late BuildContext tab;
+      await tester.pumpWidget(withNavigator(Navigator(
+        onGenerateRoute: (settings) => page<void>(settings, (context) {
+          tab = context;
+          return const SizedBox.expand();
+        }),
+      )));
+      await tester.pump();
+      expect(find.bySemanticsLabel('Chat'), findsOneWidget);
+
+      unawaited(openDialog(tab, root: false));
+      await tester.pumpAndSettle();
+      expect(find.bySemanticsLabel('Chat'), findsNothing);
+      Navigator.of(tab).pop();
+      await tester.pumpAndSettle();
+      expect(find.bySemanticsLabel('Chat'), findsOneWidget);
+      semantics.dispose();
+    });
   });
 }

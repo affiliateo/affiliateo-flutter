@@ -11,7 +11,7 @@ dependencies:
   affiliateo:
     git:
       url: https://github.com/affiliateo/affiliateo-flutter
-      ref: 4.15.4
+      ref: 4.15.5
 ```
 
 Then run `flutter pub get`.
@@ -102,6 +102,11 @@ RevenueCat's `$RCAnonymousID:...`, anything over 128 characters) are skipped,
 and nothing is sent while the person has opted out. **No email address is
 ever sent:** when you pass `email`, the SDK sends only its SHA-256 (see below),
 and nothing else about the person.
+
+### What changed in 4.15.5
+
+- Sheets, dialogs and full-screen pop-ups your app opens cover the chat
+  bubble, as in the other SDKs. It used to float over them.
 
 ### What changed in 4.15.4
 
@@ -395,7 +400,10 @@ AffiliateoChat(
 )
 ```
 
-Pass `visible: false` to hide it on a screen where it would cover something.
+The bubble is for your app's pages: sheets, dialogs and full-screen pop-ups
+(`fullscreenDialog: true`) cover it, on your main navigator or a tab's own
+navigator, and it's back once they have closed. Pass `visible: false` to hide
+it on a screen where it would cover something.
 The dashboard's "show on these screens" rules match the name you last passed
 to `Affiliateo.page(name)`, so call it per screen. If your app has its own
 navigator key, pass it as `navigatorKey`; otherwise the bubble finds the
