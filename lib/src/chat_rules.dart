@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math';
 
 // Live Chat's rules that need no screen (4.15.4), the same as the Swift,
 // Kotlin and React Native SDKs' ChatRules and the website's
@@ -113,6 +114,90 @@ ChatBubbleConfig readBubbleConfig(Object? raw) {
     iconColor: iconColor is String && _hex6.hasMatch(iconColor) ? iconColor : ChatBubbleConfig.defaultIconColor,
     style: b['style'] == 'glass' ? AffiliateoChatBubbleStyle.glass : AffiliateoChatBubbleStyle.solid,
   );
+}
+
+/// What /api/live-chat/config answered, from a read or the app channel.
+class ChatConfig {
+  const ChatConfig({
+    this.enabled = false,
+    this.showBubble = false,
+    this.online = false,
+    this.bubble = const ChatBubbleConfig(),
+  });
+
+  static const ChatConfig off = ChatConfig();
+
+  /// The business has the chat on for this app.
+  final bool enabled;
+
+  /// The bubble should show (on, and not hidden by "only while someone is online").
+  final bool showBubble;
+
+  /// Someone on the business's team is online right now.
+  final bool online;
+
+  /// The owner's corner, size, screens and colors for the bubble.
+  final ChatBubbleConfig bubble;
+}
+
+/// The config answer, read the same way wherever it comes from (a GET of
+/// /api/live-chat/config or a frame on the app channel): anything but
+/// `enabled: true` is off.
+ChatConfig readChatConfig(Object? json) {
+  if (json is! Map || json['enabled'] != true) return ChatConfig.off;
+  return ChatConfig(
+    enabled: true,
+    showBubble: json['show_bubble'] == true,
+    online: json['online'] == true,
+    bubble: readBubbleConfig(json['bubble']),
+  );
+}
+
+/// The app's own live channel, for everyone with the bubble on screen: a
+/// change of the owner's on/off switch or of a teammate's Online switch
+/// arrives on it at once as a `config` frame. It needs no key.
+String appChannelUrl(String apiBase, String appId) =>
+    '${_base(apiBase).replaceFirst(RegExp('^http'), 'ws')}/api/live-chat/app-stream?app=${Uri.encodeComponent(appId)}';
+
+/// A `config` frame from the app channel, its `config` read with
+/// [readChatConfig]; null for any other frame ("pong" included).
+ChatConfig? readAppFrame(Object? data) {
+  if (data is! String) return null;
+  final Object? frame;
+  try {
+    frame = jsonDecode(data);
+  } catch (_) {
+    return null;
+  }
+  if (frame is! Map || frame['kind'] != 'live_chat' || frame['event'] != 'config') return null;
+  final config = frame['config'];
+  return config is Map ? readChatConfig(config) : null;
+}
+
+/// Whether the app channel should be open: a bubble is placed, the app is in
+/// front, the chat is on, and the server has not refused it since the last
+/// config read.
+bool appChannelWanted({required bool bubblePlaced, required bool active, required bool enabled, required bool refused}) =>
+    bubblePlaced && active && enabled && !refused;
+
+/// A refusal of the app channel (no such app, or its chat is off): it is not
+/// tried again until a config read says the chat is on. A full server (429)
+/// or a timeout (408) is tried again later.
+bool refusesAppChannel(int? status) => status != null && status >= 400 && status < 500 && status != 408 && status != 429;
+
+/// The HTTP status a failed upgrade names ("..., HTTP status code: 404", as
+/// newer Dart versions say it); null when it names none.
+int? upgradeStatus(String error) {
+  final match = RegExp(r'HTTP status code: (\d{3})').firstMatch(error);
+  return match == null ? null : int.parse(match.group(1)!);
+}
+
+/// The wait before try number [tries] (1 and up) to reach the app channel
+/// again: 2 s doubling up to 60 s, plus up to a quarter more ([jitter] 0 to
+/// 1), so phones do not all come back at once.
+Duration appChannelDelay(int tries, double jitter) {
+  final base = min(60000, 2000 << (tries.clamp(1, 7) - 1));
+  return Duration(milliseconds: base + (base * 0.25 * jitter.clamp(0.0, 1.0)).round());
 }
 
 /// What the app's own code asks for (the AffiliateoChat widget's settings);

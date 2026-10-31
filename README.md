@@ -103,6 +103,15 @@ and nothing is sent while the person has opted out. **No email address is
 ever sent:** when you pass `email`, the SDK sends only its SHA-256 (see below),
 and nothing else about the person.
 
+### What changed (not released yet)
+
+- Switching Live Chat off in your dashboard, or someone on your team going
+  online or offline, reaches the bubble at once while the app is open: off,
+  the bubble goes and an open chat closes; otherwise the new look, corner,
+  size, screens, greeting and green dot apply right away. The SDK keeps a
+  small live channel open for it while a bubble is placed and the app is in
+  front.
+
 ### What changed in 4.15.5
 
 - Sheets, dialogs and full-screen pop-ups your app opens cover the chat
@@ -362,7 +371,9 @@ MaterialApp(
 
 Tap the bubble to open the chat; press and move it to drag it, and it
 remembers where it was left. It shows the red unread number, and a green dot
-while someone on your team is online. Nothing shows until you place
+while someone on your team is online. Switching the chat off in your
+dashboard, or someone on your team going online or offline, reaches it at once
+while the app is open. Nothing shows until you place
 `AffiliateoChat` or call `openChat()` (an app should not grow a feature its
 store reviewer never saw), nor while the chat is off for the app in your
 dashboard.

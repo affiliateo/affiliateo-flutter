@@ -43,7 +43,10 @@ import 'chat_token_store.dart';
 // bubble starts in, its size, the screens it shows on (matched against the
 // name the app last passed to page()), and a greeting that counts as one
 // unread message until the chat is opened. While the app is open and the
-// chat is closed, a socket keeps the red number live.
+// chat is closed, a socket keeps the red number live. While a bubble is
+// placed and the app is in front, the app's own channel brings the owner's
+// on/off switch and the team's Online switches at once (a `config` frame,
+// applied as a fresh config read is).
 
 /// The chat's state, for a button of your own (`Affiliateo.chatState`).
 @immutable
@@ -281,6 +284,19 @@ class LiveChat extends ChangeNotifier with WidgetsBindingObserver {
   Timer? _retry;
   Timer? _ping;
 
+  // The app channel: the owner's switch and the team's Online switches, live.
+  int _bubbles = 0;
+  WebSocket? _appSocket;
+  int _appRun = 0;
+  bool _appOn = false;
+  int _appTries = 0;
+  Timer? _appRetry;
+  Timer? _appPing;
+
+  /// The server refused the app channel (no such app, or the chat is off):
+  /// not tried again until a config read says the chat is on.
+  bool _appRefused = false;
+
   /// configure() ran: where to ask and what the SDK knows.
   void attach(ChatEnv env) {
     if (_env != null) return;
@@ -317,6 +333,19 @@ class LiveChat extends ChangeNotifier with WidgetsBindingObserver {
       unawaited(_refreshUnread());
     }
     _syncSocket();
+    _syncAppChannel();
+  }
+
+  /// An AffiliateoChat came on screen: the app channel runs while one is.
+  void bubblePlaced() {
+    _bubbles++;
+    _syncAppChannel();
+  }
+
+  /// An AffiliateoChat went away.
+  void bubbleRemoved() {
+    _bubbles = max(0, _bubbles - 1);
+    _syncAppChannel();
   }
 
   /// Whether the business has the chat on for this app (asks the server when
@@ -345,6 +374,10 @@ class LiveChat extends ChangeNotifier with WidgetsBindingObserver {
     _publish();
   }
 
+  /// Tests only: a frame as if it came on the app channel.
+  @visibleForTesting
+  void debugAppFrame(String text) => _appFrame(text);
+
   void _publish() {
     state.value = AffiliateoChatState(
       enabled: _enabled,
@@ -355,6 +388,7 @@ class LiveChat extends ChangeNotifier with WidgetsBindingObserver {
     );
     notifyListeners();
     _syncSocket();
+    _syncAppChannel();
   }
 
   Future<String?> _loadToken(String appId) async {
@@ -379,26 +413,46 @@ class LiveChat extends ChangeNotifier with WidgetsBindingObserver {
       final res = await http
           .get(Uri.parse('${env.apiBase}/api/live-chat/config?app=${Uri.encodeComponent(env.appId)}'))
           .timeout(_timeout);
-      final Object? json = res.statusCode == 200 ? jsonDecode(res.body) : null;
-      final Map<Object?, Object?>? config = json is Map && json['enabled'] == true ? json : null;
-      _known = true;
-      _enabled = config != null;
-      _showBubble = config?['show_bubble'] == true;
-      _online = config?['online'] == true;
-      dashboardBubble = config != null ? readBubbleConfig(config['bubble']) : const ChatBubbleConfig();
-      final greetingId = config != null ? dashboardBubble.greetingId : null;
-      if (greetingId == null) {
-        _greetingPending = false;
-      } else {
-        final seen = (await _prefs())?.getString(_greetingKey(env.appId));
-        final token = await _loadToken(env.appId);
-        // Somebody who already wrote has seen it.
-        _greetingPending = token == null && seen != greetingId;
-      }
-      _publish();
+      final config = readChatConfig(res.statusCode == 200 ? jsonDecode(res.body) : null);
+      // The chat is on: the app channel may be tried again.
+      if (config.enabled) _appRefused = false;
+      await _applyConfig(config, env);
     } catch (_) {
       env.log('chat: config check failed (network)');
     }
+  }
+
+  /// A config, from a read or the app channel, applied the same way.
+  Future<void> _applyConfig(ChatConfig config, ChatEnv? env) async {
+    _known = true;
+    _enabled = config.enabled;
+    _showBubble = config.showBubble;
+    _online = config.online;
+    dashboardBubble = config.bubble;
+    final greetingId = config.enabled ? dashboardBubble.greetingId : null;
+    if (greetingId == null || env == null) {
+      _greetingPending = false;
+    } else {
+      final seen = (await _prefs())?.getString(_greetingKey(env.appId));
+      final token = await _loadToken(env.appId);
+      // Somebody who already wrote has seen it.
+      _greetingPending = token == null && seen != greetingId;
+    }
+    _publish();
+  }
+
+  /// A `config` frame from the app channel: kept as a fresh config read
+  /// would be (the current config and its age) and applied the same way.
+  /// Off, the bubble goes and an open chat closes.
+  void _appFrame(Object? data) {
+    final config = readAppFrame(data);
+    if (config == null) return;
+    _lastConfig = DateTime.now();
+    if (!config.enabled) {
+      _env?.log('chat: the chat was switched off for this app');
+      close();
+    }
+    unawaited(_applyConfig(config, _env));
   }
 
   Future<void> _refreshUnread({bool force = false}) async {
@@ -622,6 +676,91 @@ class LiveChat extends ChangeNotifier with WidgetsBindingObserver {
     _tries++;
     final ms = min(60000, 1000 * pow(2, min(_tries, 6)).toInt());
     _retry = Timer(Duration(milliseconds: ms), () => unawaited(_connect(run, env, token)));
+  }
+
+  // ── The app channel ────────────────────────────────────────────────────
+
+  /// Opens or closes the app channel to match appChannelWanted. The chat
+  /// sheet may be open or closed, and the bubble hidden by the page rules:
+  /// the channel stays while a bubble is placed.
+  void _syncAppChannel() {
+    final env = _env;
+    final wanted =
+        env != null && appChannelWanted(bubblePlaced: _bubbles > 0, active: _active, enabled: _enabled, refused: _appRefused);
+    if (wanted == _appOn) return;
+    _stopAppChannel();
+    if (!wanted) return;
+    _appOn = true;
+    unawaited(_connectApp(_appRun, env));
+  }
+
+  void _stopAppChannel() {
+    _appRun++;
+    _appOn = false;
+    _appTries = 0;
+    _appRetry?.cancel();
+    _appRetry = null;
+    _appPing?.cancel();
+    _appPing = null;
+    final socket = _appSocket;
+    _appSocket = null;
+    if (socket != null) unawaited(socket.close().catchError((Object _) {}));
+  }
+
+  Future<void> _connectApp(int run, ChatEnv env) async {
+    if (run != _appRun) return;
+    final WebSocket socket;
+    try {
+      socket = await WebSocket.connect(appChannelUrl(env.apiBase, env.appId)).timeout(_timeout);
+    } on WebSocketException catch (e) {
+      if (run != _appRun) return;
+      final status = upgradeStatus(e.toString());
+      // An older Dart names no status: a refused upgrade reads as a refusal.
+      if (refusesAppChannel(status) || (status == null && e.message.contains('not upgraded'))) {
+        env.log('chat: app channel refused');
+        _appRefused = true;
+        _stopAppChannel();
+        return;
+      }
+      _appAgain(run, env);
+      return;
+    } catch (_) {
+      _appAgain(run, env);
+      return;
+    }
+    if (run != _appRun) {
+      unawaited(socket.close().catchError((Object _) {}));
+      return;
+    }
+    _appSocket = socket;
+    _appTries = 0;
+    _appPing = Timer.periodic(const Duration(seconds: 30), (_) {
+      try {
+        socket.add('ping');
+      } catch (_) {
+        // Closing.
+      }
+    });
+    socket.listen(
+      (Object? data) {
+        if (run == _appRun) _appFrame(data);
+      },
+      onError: (Object _) {},
+      onDone: () {
+        if (run != _appRun) return;
+        _appPing?.cancel();
+        _appPing = null;
+        _appSocket = null;
+        _appAgain(run, env);
+      },
+      cancelOnError: false,
+    );
+  }
+
+  void _appAgain(int run, ChatEnv env) {
+    if (run != _appRun) return;
+    _appTries++;
+    _appRetry = Timer(appChannelDelay(_appTries, Random().nextDouble()), () => unawaited(_connectApp(run, env)));
   }
 
   void _frame(Object? data) {
@@ -994,6 +1133,7 @@ class _AffiliateoChatState extends State<AffiliateoChat> {
     super.initState();
     _chat.widgetLook = _look;
     _chat.want();
+    _chat.bubblePlaced();
     _shown.add(this);
     if (!_watching) {
       _watching = true;
@@ -1031,6 +1171,7 @@ class _AffiliateoChatState extends State<AffiliateoChat> {
   @override
   void dispose() {
     _shown.remove(this);
+    _chat.bubbleRemoved();
     _chat.widgetLook = const ChatLook();
     super.dispose();
   }

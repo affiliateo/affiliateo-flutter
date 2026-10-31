@@ -78,6 +78,33 @@ void main() {
     semantics.dispose();
   });
 
+  testWidgets('the app channel: off takes the bubble away, a new config applies at once', (tester) async {
+    final semantics = tester.ensureSemantics();
+    chat.debugAnswer();
+    await tester.pumpWidget(app());
+    expect(find.bySemanticsLabel('Chat'), findsOneWidget);
+
+    chat.debugAppFrame('{"kind":"live_chat","conversation_id":"*","event":"config","config":{"enabled":false,"show_bubble":false}}');
+    await tester.pump();
+    expect(find.bySemanticsLabel('Chat'), findsNothing);
+    expect(Affiliateo.chatState.value.enabled, isFalse);
+
+    // Anything else on the channel changes nothing.
+    chat.debugAppFrame('pong');
+    await tester.pump();
+    expect(find.bySemanticsLabel('Chat'), findsNothing);
+
+    chat.debugAppFrame('{"kind":"live_chat","conversation_id":"*","event":"config","config":{"enabled":true,"show_bubble":true,'
+        '"online":true,"bubble":{"position":"top-left","size_points":44}}}');
+    await tester.pump();
+    final bubble = find.bySemanticsLabel('Chat');
+    expect(bubble, findsOneWidget);
+    expect(tester.getSize(bubble), const Size(44, 44));
+    expect(tester.getTopLeft(bubble), const Offset(20, 20));
+    expect(Affiliateo.chatState.value.online, isTrue);
+    semantics.dispose();
+  });
+
   group('the app\'s own sheets and pop-ups cover it', () {
     PageRoute<T> page<T>(RouteSettings settings, WidgetBuilder builder) => PageRouteBuilder<T>(
           settings: settings,

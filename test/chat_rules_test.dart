@@ -243,4 +243,77 @@ void main() {
     expect(isChatToken('lct_short'), isFalse);
     expect(isChatToken(null), isFalse);
   });
+
+  group('the app channel', () {
+    const onFrame = '{"kind":"live_chat","conversation_id":"*","event":"config","config":{"enabled":true,"show_bubble":true,'
+        '"online":true,"bubble":{"position":"top-left","size_points":64,"size_points_phone":48,"page_mode":"only",'
+        '"page_rules":["Home"],"greeting_id":"g2","style":"glass","color":"#7c3aed","icon_color":"#000000"}}}';
+    const offFrame = '{"kind":"live_chat","conversation_id":"*","event":"config","config":{"enabled":false,"show_bubble":false}}';
+
+    test('its address names the app and carries no key', () {
+      expect(appChannelUrl('$api/', 'my app&1'), 'wss://affiliateo.com/api/live-chat/app-stream?app=my%20app%261');
+      expect(appChannelUrl('http://localhost:3000', 'a1'), 'ws://localhost:3000/api/live-chat/app-stream?app=a1');
+    });
+
+    test('a config frame reads as a fresh config read', () {
+      final config = readAppFrame(onFrame)!;
+      expect(config.enabled, isTrue);
+      expect(config.showBubble, isTrue);
+      expect(config.online, isTrue);
+      expect(config.bubble.corner, AffiliateoChatCorner.topLeft);
+      expect(config.bubble.size, 64);
+      expect(config.bubble.sizePhone, 48);
+      expect(config.bubble.pageMode, ChatPageMode.only);
+      expect(config.bubble.pageRules, ['Home']);
+      expect(config.bubble.greetingId, 'g2');
+      expect(config.bubble.style, AffiliateoChatBubbleStyle.glass);
+      expect(config.bubble.color, '#7c3aed');
+      // The same reader as the GET.
+      final read = readChatConfig({'enabled': true, 'show_bubble': false, 'online': false});
+      expect([read.enabled, read.showBubble, read.online], [true, false, false]);
+    });
+
+    test('off is off, as a GET would read it', () {
+      final off = readAppFrame(offFrame)!;
+      expect([off.enabled, off.showBubble, off.online], [false, false, false]);
+      expect(readChatConfig({'enabled': false, 'show_bubble': true}).showBubble, isFalse);
+      expect(readChatConfig(null).enabled, isFalse);
+      expect(readAppFrame('{"kind":"live_chat","event":"config","config":{}}')!.enabled, isFalse);
+    });
+
+    test('other frames are not config', () {
+      expect(readAppFrame('pong'), isNull);
+      expect(readAppFrame('not json'), isNull);
+      expect(readAppFrame(null), isNull);
+      expect(readAppFrame('{"kind":"live_chat","event":"message","config":{"enabled":true}}'), isNull);
+      expect(readAppFrame('{"kind":"message","event":"config","config":{"enabled":true}}'), isNull);
+      expect(readAppFrame('{"kind":"live_chat","event":"config","config":true}'), isNull);
+    });
+
+    test('when it is open', () {
+      expect(appChannelWanted(bubblePlaced: true, active: true, enabled: true, refused: false), isTrue);
+      expect(appChannelWanted(bubblePlaced: false, active: true, enabled: true, refused: false), isFalse);
+      expect(appChannelWanted(bubblePlaced: true, active: false, enabled: true, refused: false), isFalse);
+      expect(appChannelWanted(bubblePlaced: true, active: true, enabled: false, refused: false), isFalse);
+      expect(appChannelWanted(bubblePlaced: true, active: true, enabled: true, refused: true), isFalse);
+    });
+
+    test('a refusal waits for the next config read', () {
+      expect(refusesAppChannel(404), isTrue);
+      expect(refusesAppChannel(403), isTrue);
+      expect(refusesAppChannel(429), isFalse);
+      expect(refusesAppChannel(408), isFalse);
+      expect(refusesAppChannel(503), isFalse);
+      expect(refusesAppChannel(null), isFalse);
+      expect(upgradeStatus("WebSocketException: Connection to 'x' was not upgraded to websocket, HTTP status code: 404"), 404);
+      expect(upgradeStatus("WebSocketException: Connection to 'x' was not upgraded to websocket"), isNull);
+    });
+
+    test('backoff doubles from 2 s to a minute, plus jitter', () {
+      expect([for (var i = 1; i <= 8; i++) appChannelDelay(i, 0).inMilliseconds], [2000, 4000, 8000, 16000, 32000, 60000, 60000, 60000]);
+      expect(appChannelDelay(1, 1).inMilliseconds, 2500);
+      expect(appChannelDelay(9, 1).inMilliseconds, 75000);
+      expect(appChannelDelay(0, 0).inMilliseconds, 2000);
+    });
+  });
 }
