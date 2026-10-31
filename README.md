@@ -1,6 +1,6 @@
 # Affiliateo Flutter SDK
 
-Mobile affiliate attribution and session tracking for Flutter apps (iOS & Android).
+Mobile affiliate attribution, session tracking and Live Chat for Flutter apps (iOS & Android).
 
 ## Installation
 
@@ -11,7 +11,7 @@ dependencies:
   affiliateo:
     git:
       url: https://github.com/affiliateo/affiliateo-flutter
-      ref: 4.12.0
+      ref: 4.15.4
 ```
 
 Then run `flutter pub get`.
@@ -102,6 +102,17 @@ RevenueCat's `$RCAnonymousID:...`, anything over 128 characters) are skipped,
 and nothing is sent while the person has opted out. **No email address is
 ever sent:** when you pass `email`, the SDK sends only its SHA-256 (see below),
 and nothing else about the person.
+
+### What changed in 4.15.4
+
+The Flutter SDK catches up with the Swift, Kotlin and React Native SDKs
+(the numbers 4.13 to 4.15.3 were never used here):
+
+- **Live Chat** (see Live Chat below): the `AffiliateoChat` bubble,
+  `Affiliateo.openChat(context)`, `chatAvailable()` and `chatState`.
+- **Store prices** (see Store prices below): `configure(storePrices: ...)`.
+- New dependencies: `webview_flutter`, `flutter_secure_storage` and
+  `url_launcher`. Their newest versions need iOS 13+ and Android API 24+.
 
 ### What changed in 4.12.0
 
@@ -331,8 +342,119 @@ transaction id. Affiliateo's own two ways are matched on it and go out once.
   forwards purchases to the network counts too: stop forwarding them, or leave
   **Send app sales** off for that network.
 
+## Live Chat
+
+Your app's users chat in real time with your team, who answer from the Live
+Chat inbox in your Affiliateo dashboard. Switch it on for the app there, then
+place the bubble once, around your app's navigator:
+
+```dart
+MaterialApp(
+  builder: (context, child) => AffiliateoChat(child: child!),
+  home: const HomeScreen(),
+)
+```
+
+Tap the bubble to open the chat; press and move it to drag it, and it
+remembers where it was left. It shows the red unread number, and a green dot
+while someone on your team is online. Nothing shows until you place
+`AffiliateoChat` or call `openChat()` (an app should not grow a feature its
+store reviewer never saw), nor while the chat is off for the app in your
+dashboard.
+
+**Your own button** instead of the bubble (or beside it):
+
+```dart
+if (await Affiliateo.chatAvailable()) {
+  // show the button
+}
+
+ValueListenableBuilder<AffiliateoChatState>(
+  valueListenable: Affiliateo.chatState,
+  builder: (context, chat, _) => TextButton(
+    onPressed: () => Affiliateo.openChat(context),
+    child: Text(chat.unread > 0 ? 'Chat (${chat.unread})' : 'Chat'),
+  ),
+)
+```
+
+**The look.** Your dashboard sets the bubble's corner, size, colors, style and
+the screens it shows on. Anything you set in code wins:
+
+```dart
+AffiliateoChat(
+  color: const Color(0xFF7C3AED),        // the circle
+  iconColor: Colors.white,               // the speech bubble inside it
+  sendColor: const Color(0xFF7C3AED),    // the send button and the person's messages
+  placeholder: 'Ask us anything',        // the message box text, in your app's language
+  bubbleStyle: AffiliateoChatBubbleStyle.glass,
+  corner: AffiliateoChatCorner.bottomLeft,
+  size: 52,                              // 40 to 80
+  bottomPadding: 72,                     // room for a tab bar
+  child: child!,
+)
+```
+
+Pass `visible: false` to hide it on a screen where it would cover something.
+The dashboard's "show on these screens" rules match the name you last passed
+to `Affiliateo.page(name)`, so call it per screen. If your app has its own
+navigator key, pass it as `navigatorKey`; otherwise the bubble finds the
+navigator itself.
+
+**How it works.** The chat is Affiliateo's hosted chat page in a sheet over
+your app, the same page the website bubble and the other SDKs open. The
+person's key to their conversation lives in the phone's secure store (the
+Keychain on iPhone, the Keystore on Android), on this phone only. `logout()`,
+`reset()` and a different user signing in drop it, so the next person on the
+phone starts a new conversation. The sheet loads only your app's own chat
+page, and a link opens in the browser only when the person taps it in a
+message from your team. The device, visitor and user ids go to your inbox as
+labels, and are left out while the person has opted out of tracking.
+
+## Store prices
+
+Your app's product cards on Affiliateo show each product's US price. If you
+sell through RevenueCat or Adapty alone, Affiliateo can't read the store's
+price list, so phones can report it: once a day, in the background, only on a
+phone whose store is the US one, and only for the products Affiliateo asks
+about. A price shows once enough phones agree. Nothing about the person is
+sent.
+
+Flutter reads store prices through a plugin, and the SDK adds none: hand it a
+reader that asks yours. With RevenueCat (`purchases_flutter`):
+
+```dart
+await Affiliateo.configure(
+  appId: 'YOUR_APP_ID',
+  storePrices: (ids) async {
+    final storefront = await Purchases.storefront;
+    final products = [
+      ...await Purchases.getProducts(ids),
+      ...await Purchases.getProducts(ids, productCategory: ProductCategory.nonSubscription),
+    ];
+    return AffiliateoStorePrices(
+      countryCode: storefront?.countryCode ?? '',
+      products: [
+        for (final p in products)
+          AffiliateoStoreProduct(
+            id: p.identifier,
+            // A Google Play subscription's regular price, not its trial.
+            price: (p.defaultOption?.fullPricePhase?.price.amountMicros ?? (p.price * 1000000)) / 1000000,
+            currencyCode: p.currencyCode,
+          ),
+      ],
+    );
+  },
+);
+```
+
+Give the regular price, not a trial or introductory one. Without a reader,
+nothing is reported. Prices are for display only: commission is always worked
+out from the amount paid.
+
 ## Requirements
 
 - Flutter 3.10+
 - Dart 3.0+
-- iOS 12+ / Android API 21+
+- iOS 13+ / Android API 24+ (since 4.15.4, for Live Chat's web view and
+  secure store; 4.12.0 ran on iOS 12+ / Android API 21+)

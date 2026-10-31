@@ -5,6 +5,7 @@ import 'dart:io';
 import 'dart:math';
 import 'dart:ui';
 
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/widgets.dart';
 import 'package:http/http.dart' as http;
 import 'package:android_play_install_referrer/android_play_install_referrer.dart';
@@ -12,9 +13,12 @@ import 'package:device_info_plus/device_info_plus.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'chat.dart';
+import 'chat_rules.dart';
 import 'free_access.dart';
 import 'models.dart';
 import 'queue.dart';
+import 'store_prices.dart';
 
 /// Main entry point for the Affiliateo SDK.
 ///
@@ -112,6 +116,9 @@ class Affiliateo with WidgetsBindingObserver {
   String? _advertisingId;
   String? _metaAnonId;
 
+  // Reads the store's prices with the app's own store plugin (4.15.4).
+  AffiliateoStorePriceReader? _storePriceReader;
+
   static AffiliateoState _state = const AffiliateoState();
 
   /// Current attribution state.
@@ -128,11 +135,12 @@ class Affiliateo with WidgetsBindingObserver {
   /// SDK decision to the Flutter DevTools console. Defaults to false.
   static Future<void> configure({
     String? appId,
-    @Deprecated('Affiliateo campaigns are now apps — use appId') String? campaignId,
+    @Deprecated('Affiliateo campaigns are now apps: use appId') String? campaignId,
     String apiUrl = 'https://affiliateo.com',
     bool debug = false,
     int flushIntervalMs = 5000,
     int maxQueueSize = 100,
+    AffiliateoStorePriceReader? storePrices,
   }) {
     final first = !_instance._configured;
     final work = _configure(
@@ -141,6 +149,7 @@ class Affiliateo with WidgetsBindingObserver {
       debug: debug,
       flushIntervalMs: flushIntervalMs,
       maxQueueSize: maxQueueSize,
+      storePrices: storePrices,
     );
     // Kept for freeAccess() (4.12.0). _configure marks the SDK configured
     // before its first await, so this is the call that is starting it.
@@ -154,10 +163,11 @@ class Affiliateo with WidgetsBindingObserver {
     required bool debug,
     required int flushIntervalMs,
     required int maxQueueSize,
+    AffiliateoStorePriceReader? storePrices,
   }) async {
     final resolvedAppId = appId;
     if (resolvedAppId == null) {
-      developer.log('Missing appId — pass your app ID to Affiliateo.configure().', name: 'Affiliateo');
+      developer.log('Missing appId: pass your app ID to Affiliateo.configure().', name: 'Affiliateo');
       return;
     }
     if (_instance._configured) return;
@@ -167,6 +177,7 @@ class Affiliateo with WidgetsBindingObserver {
     // Pick up the debug flag BEFORE any other side effect so the next _log
     // call (in the opted-out branch or _identify below) actually fires.
     _instance._debug = debug;
+    _instance._storePriceReader = storePrices;
     _instance._log('init', {'app': resolvedAppId});
 
     // Hydrate opt-out flag BEFORE anything else touches the network. A
@@ -190,6 +201,18 @@ class Affiliateo with WidgetsBindingObserver {
 
     // Get stable device ID
     _instance._deviceId = await _instance._getStableDeviceId();
+
+    // Live Chat (4.15.4) works opted out too (the ids are then left out of
+    // the chat page), so it learns where to ask before the opted-out return.
+    LiveChat.instance.attach(ChatEnv(
+      apiBase: _instance._apiUrl,
+      appId: resolvedAppId,
+      deviceId: () => _instance._deviceId,
+      visitorId: () => _state.visitorId,
+      userId: () => _instance._userId,
+      optedOut: () => _instance._optedOut,
+      log: (message) => _instance._log(message),
+    ));
 
     if (_instance._optedOut) {
       _instance._log('blocked: opted out (call optIn() to re-enable)');
@@ -222,6 +245,8 @@ class Affiliateo with WidgetsBindingObserver {
   /// Call from `initState()` of each screen or from a route observer.
   /// Returns immediately; the queue handles delivery + retry.
   static Future<void> page(String screenName, [Map<String, dynamic>? metadata]) async {
+    // Live Chat's page rules follow the screen, opted out or not.
+    if (screenName.isNotEmpty) LiveChat.instance.screen.value = screenName;
     if (_instance._optedOut) return;
     _instance._log('page', {'screen': screenName, 'metadata': metadata});
     _instance._enqueueEvent({
@@ -310,6 +335,9 @@ class Affiliateo with WidgetsBindingObserver {
       _freeAccessEpoch++;
       await _clearFreeAccess();
     }
+    // Somebody else on this phone starts their own Live Chat thread
+    // (signing in from anonymous keeps the one they had).
+    if (previousUser != null && previousUser != uid) await LiveChat.instance.forget();
     if (changed || hadPendingLogout || hashChanged) await _saveUserState();
     // Already confirmed this launch: nothing to send.
     if (_syncedUser == uid && _syncedEmailHash == _emailHash) return;
@@ -336,6 +364,8 @@ class Affiliateo with WidgetsBindingObserver {
   }
 
   Future<void> _signOut() async {
+    // The next person on the phone starts a new Live Chat thread.
+    await LiveChat.instance.forget();
     _userTouched = true;
     _userId = null;
     _emailHash = null;
@@ -687,7 +717,7 @@ class Affiliateo with WidgetsBindingObserver {
   /// Stop tracking on this device. Sets a persistent opt-out flag in
   /// SharedPreferences and silences ALL subsequent page / track /
   /// identify calls until optIn() is called. Survives app restart.
-  /// Pending queued events are dropped — the visitor explicitly said
+  /// Pending queued events are dropped: the visitor explicitly said
   /// no, sending events captured before the decision would still
   /// violate consent. Use for GDPR/CCPA "Don't track me" consent.
   static Future<void> optOut() async {
@@ -998,7 +1028,7 @@ class Affiliateo with WidgetsBindingObserver {
     );
   }
 
-  /// Android only: the Play Install Referrer — the link (and its utm /
+  /// Android only: the Play Install Referrer: the link (and its utm /
   /// click-id tags) that installed the app. How a paid-ad install (Meta /
   /// TikTok / Google Ads) gets its source labelled server-side. Read once,
   /// then cached in SharedPreferences; transient failures retry next launch.
@@ -1018,8 +1048,88 @@ class Affiliateo with WidgetsBindingObserver {
       await prefs.setBool('affiliateo_install_referrer_done', true);
       return value;
     } catch (_) {
-      // Play Store unavailable / non-Play install — retry next launch.
+      // Play Store unavailable / non-Play install: retry next launch.
       return null;
+    }
+  }
+
+  // ── Live Chat (4.15.4) ─────────────────────────────────────────────────
+
+  /// Opens Live Chat (4.15.4): the person chats with your team, who answer
+  /// from the Live Chat inbox in your Affiliateo dashboard. For a button of
+  /// your own; the [AffiliateoChat] bubble opens it by itself.
+  ///
+  /// Does nothing while the chat is off for this app in your dashboard.
+  /// [sendColor] colors the send button and the person's own messages;
+  /// [placeholder] is the message box text in your app's own language (up to
+  /// 60 characters). Both win over what [AffiliateoChat] set.
+  static Future<void> openChat(BuildContext context, {Color? sendColor, String? placeholder}) async {
+    final navigator = Navigator.maybeOf(context, rootNavigator: true);
+    if (navigator == null) {
+      _instance._log('chat: openChat needs a context under a Navigator');
+      return;
+    }
+    String? hex(Color? color) =>
+        // ignore: deprecated_member_use
+        color == null ? null : '#${(color.value & 0xFFFFFF).toRadixString(16).padLeft(6, '0')}';
+    await LiveChat.instance.open(navigator, look: ChatLook(sendColor: hex(sendColor), placeholder: placeholder));
+  }
+
+  /// Closes the chat when it is open.
+  static void closeChat() => LiveChat.instance.close();
+
+  /// Whether the chat is on for this app in your dashboard (asks the server
+  /// the first time). Use it to show or hide a chat button of your own.
+  static Future<bool> chatAvailable() => LiveChat.instance.available();
+
+  /// The chat's state for a button of your own: whether it is on, someone
+  /// is online, and the unread count (the bubble's red number). Listen with
+  /// a ValueListenableBuilder. Reading it starts the chat's checks.
+  static ValueListenable<AffiliateoChatState> get chatState {
+    LiveChat.instance.want();
+    return LiveChat.instance.state;
+  }
+
+  // ── Store prices (4.15.4) ──────────────────────────────────────────────
+
+  /// See store_prices.dart. Marked done for the day once the check finishes
+  /// (a report, or nothing to report); a failed one is tried again next
+  /// launch.
+  Future<void> _reportStorePricesIfDue(String campaignId, String deviceId) async {
+    final reader = _storePriceReader;
+    if (reader == null) return;
+    try {
+      final prefs = await _prefs();
+      if (prefs == null) return;
+      final key = storePricesCheckedKey(campaignId);
+      final stored = int.tryParse(prefs.getString(key) ?? '');
+      final now = DateTime.now().millisecondsSinceEpoch;
+      if (!storePricesDue(stored != null && stored > 0 ? stored : null, now)) return;
+      final asked = await _postJson(
+        '/api/v1/mobile/store-prices',
+        {'campaign_id': campaignId, 'device_id': deviceId},
+        timeout: const Duration(seconds: 15),
+      );
+      if (asked == null || asked.statusCode != 200) return;
+      final Object? json = jsonDecode(asked.body);
+      final ids = json is Map && json['product_ids'] is List
+          ? (json['product_ids'] as List).whereType<String>().where((id) => id.isNotEmpty).toList()
+          : const <String>[];
+      if (json is Map && json['report'] == true && ids.isNotEmpty) {
+        final prices = storePriceReport(await reader(ids), ids);
+        if (prices != null) {
+          final sent = await _postJson(
+            '/api/v1/mobile/store-prices',
+            {'campaign_id': campaignId, 'device_id': deviceId, 'storefront': 'US', 'prices': prices},
+            timeout: const Duration(seconds: 15),
+          );
+          if (sent == null || sent.statusCode != 200) return;
+          _log('store prices reported', {'count': prices.length});
+        }
+      }
+      await prefs.setString(key, '$now');
+    } catch (_) {
+      // The app's reader threw, or the answer was not JSON: next launch.
     }
   }
 
@@ -1095,10 +1205,13 @@ class Affiliateo with WidgetsBindingObserver {
         _launchSync = sync;
         unawaited(sync);
 
+        // The store's prices for the app's products, once a day (4.15.4).
+        if (!_optedOut) unawaited(_reportStorePricesIfDue(campaignId, deviceId));
+
         // No RevenueCat auto-set here: Dart can't dynamically import
         // purchases_flutter, so the app developer sets the subscriber
         // attributes themselves (affiliateo_visitor_id for every user +
-        // affiliateo_ref when matched) — see the note at the bottom of
+        // affiliateo_ref when matched); see the note at the bottom of
         // this file and the README's RevenueCat Integration section.
       } else {
         _log('identify failed', 'http_status=${response.statusCode}');
@@ -1158,7 +1271,7 @@ class Affiliateo with WidgetsBindingObserver {
   // _sendEvent used to live here: an unqueued http.post straight to
   // /api/v1/mobile/event. Nothing called it. Every real send path goes
   // through _enqueueEvent so it gets persistence, retry, and the dedup id,
-  // which is why this one had quietly rotted — a direct post would have
+  // which is why this one had quietly rotted: a direct post would have
   // dropped the event on any network blip with no second attempt.
   //
   // Deleted rather than wired up: it duplicated _enqueueEvent's job with
