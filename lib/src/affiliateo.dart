@@ -948,6 +948,8 @@ class Affiliateo with WidgetsBindingObserver {
     // was lost on a flaky connection comes back on the next flush and counts
     // twice. For a `custom` event that is a duplicated funnel conversion.
     event.putIfAbsent('event_id', _generateUuidV4);
+    // One event per entry here; since 4.16.1 the queue's flush sends the
+    // neighbouring entries of this app and device as one request.
     queue.enqueue(
       '$_apiUrl/api/v1/mobile/event',
       {

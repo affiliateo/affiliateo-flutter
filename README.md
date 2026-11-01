@@ -11,7 +11,7 @@ dependencies:
   affiliateo:
     git:
       url: https://github.com/affiliateo/affiliateo-flutter
-      ref: 4.16.0
+      ref: 4.16.1
 ```
 
 Then run `flutter pub get`.
@@ -102,6 +102,14 @@ RevenueCat's `$RCAnonymousID:...`, anything over 128 characters) are skipped,
 and nothing is sent while the person has opted out. **No email address is
 ever sent:** when you pass `email`, the SDK sends only its SHA-256 (see below),
 and nothing else about the person.
+
+### What changed in 4.16.1
+
+- Tracking sends less: the events waiting in the queue (screen views,
+  `track()` events, session pings) of one flush now go to the server in one
+  request instead of one request per event. They still leave on the same
+  timer, with no extra wait, and each keeps its own id and time. Purchases
+  and ad ids still go one by one, and Live Chat is unchanged.
 
 ### What changed in 4.16.0
 
