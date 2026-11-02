@@ -1,5 +1,15 @@
 name: affiliateo
 description: Mobile affiliate attribution, session tracking and Live Chat for Flutter apps.
+# 4.16.2: tracking events wait instead of being lost. When the server is
+#   busy or out of reach (no answer, a time out, 404, 408, 429 or 5xx) the
+#   queue keeps the events and tries again after 5 seconds, then 10, 20 and
+#   so on up to about 5 minutes, never sooner than the server's Retry-After
+#   asks. They used to be dropped after three tries 5 seconds apart. Only a
+#   request the server refuses (another 4xx) is dropped, with one line in
+#   the debug log, and only the queue's size cap drops a waiting event. The
+#   events still waiting are sent as the app leaves the screen, and a
+#   request with no answer is given up after 20 seconds (there was no
+#   limit). No API changes.
 # 4.16.1: tracking events of one flush go to the server in one request: the
 #   queued page(), track() and session events of the same app and device
 #   now share one POST to /api/v1/mobile/event (up to 100 events and about
@@ -79,7 +89,7 @@ description: Mobile affiliate attribution, session tracking and Live Chat for Fl
 # paid-ad install (Meta / TikTok / Google Ads) gets its source labelled
 # server-side with zero merchant work. Additive, no API changes.
 # 3.0.0: event queue + reset/optOut/optIn/flush + TrackedScreen widget.
-version: 4.16.1
+version: 4.16.2
 homepage: https://affiliateo.com
 repository: https://github.com/affiliateo/affiliateo-flutter
 

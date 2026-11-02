@@ -7,6 +7,8 @@ import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'send_retry.dart';
+
 /// EventQueue: durable best-effort delivery for analytics events.
 ///
 /// Mirrors the @affiliateo/web, @affiliateo/react-native, affiliateo-swift,
@@ -19,7 +21,13 @@ import 'package:shared_preferences/shared_preferences.dart';
 ///   - A periodic [Timer] fires every [_flushIntervalMs] to attempt delivery
 ///   - connectivity_plus stream pauses flushing while offline; fires an
 ///     immediate flush the moment connectivity returns (no waiting for the timer)
-///   - Failed events bump a per-event retry counter; dropped after [_maxRetries]
+///   - Retries (4.16.2, see send_retry.dart): an answer that may change (no
+///     answer, 404, 408, 429, 5xx) keeps the request's events, and the queue
+///     waits 5 s, doubling up to 5 minutes, before its next try, at least as
+///     long as a 429 or 503 asks (Retry-After). The rest of that flush waits
+///     too. A refusal (another 4xx) drops them, with one debug line. Only the
+///     size cap drops a waiting event; it used to be dropped after its third
+///     failed try, on the fixed 5 s timer
 ///   - Since 4.16.1 one flush sends neighbouring /mobile/event entries of the
 ///     same app and device as ONE request (see [_planSends]); every other
 ///     endpoint still goes one entry per request, in queue order
@@ -31,33 +39,48 @@ import 'package:shared_preferences/shared_preferences.dart';
 ///   headaches; hive a transitive Pub dep for no real benefit.
 ///
 /// Caps (matched to web + RN + Swift + Kotlin for cross-platform consistency):
-///   - _maxRetries = 3
 ///   - _maxQueueSize = 100      hard cap, FIFO drop on overflow
 ///   - _flushIntervalMs = 5_000 periodic auto-flush cadence
 ///   - _sizeFlushThreshold = 10 trigger flush when queue grows past
+///   - _requestTimeout = 20 s   a request with no answer by then is given up
+///                              (and its events kept)
 class EventQueue {
   EventQueue({
     int flushIntervalMs = _defaultFlushIntervalMs,
     int maxQueueSize = _defaultMaxQueueSize,
+    void Function(String message)? log,
   }) : this._(
           flushIntervalMs: flushIntervalMs,
           maxQueueSize: maxQueueSize,
           client: null,
           automatic: true,
+          now: DateTime.now,
+          jitter: null,
+          log: log,
+          requestTimeout: _defaultRequestTimeout,
         );
 
   /// Tests only: sends through [client], and nothing happens on its own (no
   /// timer, no connectivity listener, no flush at 10 queued or on start), so
-  /// a test decides exactly when [flush] runs.
+  /// a test decides exactly when [flush] runs. [now] and [jitter] (0 to 1)
+  /// set the clock and the spread of the retry waits.
   @visibleForTesting
   EventQueue.forTest({
     required http.Client client,
     int maxQueueSize = _defaultMaxQueueSize,
+    DateTime Function()? now,
+    double Function()? jitter,
+    void Function(String message)? log,
+    Duration requestTimeout = _defaultRequestTimeout,
   }) : this._(
           flushIntervalMs: _defaultFlushIntervalMs,
           maxQueueSize: maxQueueSize,
           client: client,
           automatic: false,
+          now: now ?? DateTime.now,
+          jitter: jitter,
+          log: log,
+          requestTimeout: requestTimeout,
         );
 
   EventQueue._({
@@ -65,18 +88,28 @@ class EventQueue {
     required int maxQueueSize,
     required http.Client? client,
     required bool automatic,
+    required DateTime Function() now,
+    required double Function()? jitter,
+    required void Function(String message)? log,
+    required Duration requestTimeout,
   })  : _flushIntervalMs = flushIntervalMs.clamp(1000, 60000),
         _maxQueueSize = maxQueueSize.clamp(10, 1000),
         _client = client,
-        _automatic = automatic {
+        _automatic = automatic,
+        _now = now,
+        _retry = SendRetry(jitter: jitter),
+        _log = log,
+        _requestTimeout = requestTimeout {
     _ready = _init();
   }
 
   static const _storageKey = 'affiliateo_event_queue';
-  static const _maxRetries = 3;
   static const _defaultMaxQueueSize = 100;
   static const _defaultFlushIntervalMs = 5000;
   static const _sizeFlushThreshold = 10;
+  // How long a request may go without an answer (4.16.2). There was no limit:
+  // a request that hung held the queue until the app closed.
+  static const _defaultRequestTimeout = Duration(seconds: 20);
 
   /// The event endpoint whose entries one flush may merge into one request.
   static const _eventPath = '/api/v1/mobile/event';
@@ -94,10 +127,16 @@ class EventQueue {
   final int _flushIntervalMs;
   final int _maxQueueSize;
 
-  // Null in the app: each send is a plain http.post, as before 4.16.1.
+  // Null in the app: each flush opens its own client and closes it at the
+  // end (4.16.2), which also ends a request given up on its time limit.
   final http.Client? _client;
   // False only in tests (see [EventQueue.forTest]).
   final bool _automatic;
+  final DateTime Function() _now;
+  // When the next try may go after a kept answer (4.16.2).
+  final SendRetry _retry;
+  final void Function(String message)? _log;
+  final Duration _requestTimeout;
   late final Future<void> _ready;
 
   final List<_QueuedEvent> _queue = [];
@@ -148,21 +187,23 @@ class EventQueue {
     }
   }
 
-  /// Try to deliver every queued event. Each entry gets one attempt per
-  /// flush; failures bump retries and stay queued. Entries that hit
-  /// [_maxRetries] are dropped. Skipped entirely when offline.
+  /// Try to deliver every queued event, in queue order. Skipped entirely
+  /// when offline, and until the wait after a kept answer is over (4.16.2,
+  /// see send_retry.dart).
   ///
   /// Neighbouring /mobile/event entries of the same app and device go in
-  /// one request (see [_planSends]). Such a request succeeds or fails for
-  /// all of its entries together, and each of them is then treated exactly
-  /// as a lone entry would be: removed on a 2xx, otherwise one more retry
-  /// and dropped at [_maxRetries]. Resending is safe because the server
-  /// keeps one row per event_id.
+  /// one request (see [_planSends]), and its answer counts for all of them:
+  /// sent or refused, they leave the queue; kept, each counts one more try
+  /// and stays, and the flush ends there, so the rest waits behind them.
+  /// Resending is safe because the server keeps one row per event_id.
   Future<void> flush() async {
-    if (!_hydrated || _isFlushing || _queue.isEmpty || !_isConnected) {
+    if (!_hydrated || _isFlushing || _queue.isEmpty || !_isConnected || !_retry.canSend(_now())) {
       return;
     }
     _isFlushing = true;
+    // One client for the whole flush; closing it ends a request still
+    // running after its time limit.
+    final client = _client ?? http.Client();
     try {
       // Snapshot the queue so new enqueue()s during the flush land in
       // the live queue and get picked up on the NEXT flush (no infinite
@@ -170,37 +211,37 @@ class EventQueue {
       final snapshot = List<_QueuedEvent>.from(_queue);
 
       for (final send in _planSends(snapshot)) {
-        bool ok = false;
+        int? status;
+        String? retryAfter;
         try {
           final uri = Uri.parse(send.endpoint);
           const headers = {'Content-Type': 'application/json'};
-          final body = send.body();
-          final client = _client;
-          final response = client != null
-              ? await client.post(uri, headers: headers, body: body)
-              : await http.post(uri, headers: headers, body: body);
-          ok = response.statusCode >= 200 && response.statusCode < 300;
+          final response = await client.post(uri, headers: headers, body: send.body()).timeout(_requestTimeout);
+          status = response.statusCode;
+          retryAfter = response.headers['retry-after'];
         } catch (_) {
-          ok = false;
+          // No answer: offline, a time out, an address that cannot be read.
         }
 
-        for (final event in send.entries) {
-          if (ok) {
-            _queue.removeWhere((e) => e.id == event.id);
-          } else {
-            final idx = _queue.indexWhere((e) => e.id == event.id);
-            if (idx >= 0) {
-              _queue[idx].retries += 1;
-              if (_queue[idx].retries >= _maxRetries) {
-                _queue.removeAt(idx);
-              }
-            }
+        final outcome = _retry.answered(status, retryAfter, _now());
+        final ids = {for (final e in send.entries) e.id};
+        if (outcome == SendOutcome.kept) {
+          // An entry gone meanwhile (clear(), the size cap) is skipped.
+          for (final e in _queue) {
+            if (ids.contains(e.id)) e.retries += 1;
           }
+          // The server is busy or out of reach for the rest too.
+          break;
+        }
+        _queue.removeWhere((e) => ids.contains(e.id));
+        if (outcome == SendOutcome.refused) {
+          _log?.call('dropped ${ids.length} queued event(s): the server refused them (HTTP $status, ${send.endpoint})');
         }
       }
 
       await _persist();
     } finally {
+      if (_client == null) client.close();
       _isFlushing = false;
     }
   }
@@ -330,12 +371,12 @@ class EventQueue {
   void _startConnectivityListener() {
     // connectivity_plus emits a [ConnectivityResult] (or List on 5.x+) every
     // time the connection state changes. Treat anything that isn't `none`
-    // as "online" — the queue will retry failed flushes via its own
-    // retry counter if a "connected but no internet" state slips
-    // through.
+    // as "online": if a "connected but no internet" state slips through,
+    // the requests get no answer and the queue keeps their events and
+    // tries again later.
     final connectivity = Connectivity();
     // Get the initial state synchronously-ish so we don't start out
-    // optimistically and waste retries.
+    // optimistically and send into nothing.
     connectivity.checkConnectivity().then((result) {
       _updateConnectivity(result);
     }).catchError((_) { /* swallow */ });
@@ -353,8 +394,10 @@ class EventQueue {
         : (result != ConnectivityResult.none);
     _isConnected = connected;
     if (wasOffline && _isConnected) {
-      // Came back online — fire a catch-up flush right now instead of
-      // waiting up to _flushIntervalMs for the timer.
+      // Came back online: a wait for the network is over (one the server
+      // asked for still holds), so fire a catch-up flush right now instead
+      // of waiting up to _flushIntervalMs for the timer.
+      _retry.networkBack();
       unawaited(flush());
     }
   }
@@ -383,6 +426,8 @@ class _QueuedEvent {
   final String id;
   final String endpoint;
   final String payloadJson;
+  // Kept answers so far. A record only since 4.16.2: nothing is dropped
+  // for it.
   int retries;
 }
 

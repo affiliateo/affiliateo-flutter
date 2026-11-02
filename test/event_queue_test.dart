@@ -1,4 +1,6 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:io' show HttpDate;
 
 import 'package:affiliateo/src/queue.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -12,17 +14,27 @@ const purchaseUrl = '$api/api/v1/mobile/purchase';
 const adIdsUrl = '$api/api/v1/mobile/ad-ids';
 const storageKey = 'affiliateo_event_queue';
 
-/// Answers every request with [status] (or fails it, with [offline]) and
-/// keeps what it was sent.
+/// Answers every request with [status] (or [statusByUrl] for its URL), with
+/// [retryAfter] as its Retry-After when set; fails it with [offline], or
+/// never answers it with [hang]. Keeps what it was sent.
 class FakeServer {
   final List<http.Request> requests = [];
   int status = 200;
+  final Map<String, int> statusByUrl = {};
+  String? retryAfter;
   bool offline = false;
+  bool hang = false;
 
   late final http.Client client = MockClient((request) async {
     requests.add(request);
     if (offline) throw http.ClientException('offline', request.url);
-    return http.Response('{"ok":true}', status);
+    if (hang) return Completer<http.Response>().future;
+    final after = retryAfter;
+    return http.Response(
+      '{"ok":true}',
+      statusByUrl[request.url.toString()] ?? status,
+      headers: {if (after != null) 'retry-after': after},
+    );
   });
 
   List<String> get urls => requests.map((r) => r.url.toString()).toList();
@@ -56,8 +68,29 @@ void track(EventQueue queue, Map<String, dynamic> event, {String app = 'app-1', 
 
 String idOf(Map<String, dynamic> event) => event['event_id'] as String;
 
-Future<EventQueue> openQueue(FakeServer server, {int maxQueueSize = 100}) async {
-  final queue = EventQueue.forTest(client: server.client, maxQueueSize: maxQueueSize);
+/// The queue's clock, moved by hand.
+class Clock {
+  DateTime now = DateTime.utc(2026, 11, 1, 12);
+  void advance(Duration by) => now = now.add(by);
+}
+
+Future<EventQueue> openQueue(
+  FakeServer server, {
+  int maxQueueSize = 100,
+  Clock? clock,
+  List<String>? logged,
+  Duration requestTimeout = const Duration(seconds: 20),
+}) async {
+  final time = clock ?? Clock();
+  final queue = EventQueue.forTest(
+    client: server.client,
+    maxQueueSize: maxQueueSize,
+    // No jitter, so a kept answer's wait is exactly 5 s, 10 s, 20 s...
+    now: () => time.now,
+    jitter: () => 0.0,
+    log: logged?.add,
+    requestTimeout: requestTimeout,
+  );
   await queue.ready;
   return queue;
 }
@@ -204,7 +237,8 @@ void main() {
   });
 
   test('a failed request keeps every merged entry, and the retry sends the same events', () async {
-    final queue = await openQueue(server);
+    final clock = Clock();
+    final queue = await openQueue(server, clock: clock);
     for (var i = 0; i < 5; i++) {
       track(queue, screenView());
     }
@@ -217,11 +251,17 @@ void main() {
     expect(saved, hasLength(5));
     expect(saved.map((e) => (e as Map)['retries']), everyElement(1));
 
+    // 4.16.2: no next try before the 5 s wait is over, flush() or not.
+    await queue.flush();
+    expect(server.requests, hasLength(1));
+
+    clock.advance(const Duration(seconds: 5));
     server.offline = true;
     await queue.flush();
     expect(server.requests, hasLength(2));
     expect(queue.size, 5);
 
+    clock.advance(const Duration(seconds: 10));
     server
       ..offline = false
       ..status = 200;
@@ -231,22 +271,157 @@ void main() {
     expect(queue.size, 0);
   });
 
-  test('a refused request counts one try for every entry in it, as for a lone entry', () async {
-    final queue = await openQueue(server);
+  test('a refused request drops every entry in it, with one debug line, and the flush carries on', () async {
+    final logged = <String>[];
+    final queue = await openQueue(server, logged: logged);
     for (var i = 0; i < 3; i++) {
       track(queue, screenView());
     }
+    queue.enqueue(purchaseUrl, {'campaign_id': 'app-1', 'device_id': 'device-1', 'product_id': 'pro', 'price': 9.99});
 
-    server.status = 400;
+    server.statusByUrl[eventUrl] = 400;
     await queue.flush();
-    expect(queue.size, 3);
-    server.status = 404;
-    await queue.flush();
-    expect(queue.size, 3);
-    await queue.flush();
-    // Third try: dropped, as one entry always was.
+
+    // 4.16.2: the same bytes would be refused again, so they are not kept.
+    expect(server.urls, [eventUrl, purchaseUrl]);
+    expect(server.events(0), hasLength(3));
     expect(queue.size, 0);
-    expect([for (var i = 0; i < 3; i++) server.events(i).length], [3, 3, 3]);
+    expect(logged, hasLength(1));
+    expect(logged.single, contains('HTTP 400'));
+    expect(logged.single, contains(eventUrl));
+  });
+
+  test('404 and 408 keep the events (404: the device may not be known yet)', () async {
+    final clock = Clock();
+    final logged = <String>[];
+    final queue = await openQueue(server, clock: clock, logged: logged);
+    track(queue, screenView());
+
+    for (final status in [404, 408, 404]) {
+      server.status = status;
+      await queue.flush();
+      expect(queue.size, 1, reason: '$status');
+      clock.advance(const Duration(minutes: 10));
+    }
+    expect(server.requests, hasLength(3));
+    expect(logged, isEmpty);
+  });
+
+  test('a 429 waits as long as its Retry-After asks', () async {
+    final clock = Clock();
+    final queue = await openQueue(server, clock: clock);
+    track(queue, screenView());
+
+    server
+      ..status = 429
+      ..retryAfter = '30';
+    await queue.flush();
+    clock.advance(const Duration(seconds: 29));
+    await queue.flush();
+    expect(server.requests, hasLength(1));
+
+    clock.advance(const Duration(seconds: 1));
+    server
+      ..status = 200
+      ..retryAfter = null;
+    await queue.flush();
+    expect(server.requests, hasLength(2));
+    expect(queue.size, 0);
+  });
+
+  test('a 503 waits until its Retry-After date', () async {
+    final clock = Clock();
+    final queue = await openQueue(server, clock: clock);
+    track(queue, screenView());
+
+    server
+      ..status = 503
+      ..retryAfter = HttpDate.format(clock.now.add(const Duration(seconds: 90)));
+    await queue.flush();
+    clock.advance(const Duration(seconds: 89));
+    await queue.flush();
+    expect(server.requests, hasLength(1));
+
+    clock.advance(const Duration(seconds: 1));
+    await queue.flush();
+    expect(server.requests, hasLength(2));
+  });
+
+  test('the wait doubles up to 5 minutes, and a waiting event is never dropped for it', () async {
+    final clock = Clock();
+    final queue = await openQueue(server, clock: clock);
+    track(queue, screenView());
+    server.status = 500;
+
+    var tries = 0;
+    for (final seconds in [5, 10, 20, 40, 80, 160, 300, 300, 300]) {
+      await queue.flush();
+      tries++;
+      expect(server.requests, hasLength(tries));
+      // A second short of the wait: nothing goes.
+      clock.advance(Duration(seconds: seconds - 1));
+      await queue.flush();
+      expect(server.requests, hasLength(tries), reason: 'wait $seconds s');
+      clock.advance(const Duration(seconds: 1));
+    }
+    expect(queue.size, 1);
+    expect(((await savedQueue()).single as Map)['retries'], 9);
+  });
+
+  test('a kept answer ends the flush: what comes after it waits behind it, in order', () async {
+    final clock = Clock();
+    final queue = await openQueue(server, clock: clock);
+    final e1 = screenView(), e2 = screenView();
+    track(queue, e1);
+    queue.enqueue(purchaseUrl, {'campaign_id': 'app-1', 'device_id': 'device-1', 'product_id': 'pro', 'price': 9.99});
+    track(queue, e2);
+
+    server.statusByUrl[purchaseUrl] = 503;
+    await queue.flush();
+    expect(server.urls, [eventUrl, purchaseUrl]);
+    expect(queue.size, 2);
+
+    server.statusByUrl.clear();
+    clock.advance(const Duration(seconds: 5));
+    await queue.flush();
+    expect(server.urls, [eventUrl, purchaseUrl, purchaseUrl, eventUrl]);
+    expect(server.eventIds(3), [idOf(e2)]);
+    expect(queue.size, 0);
+  });
+
+  test('a request with no answer by its time limit is given up, and its events kept', () async {
+    final clock = Clock();
+    final queue = await openQueue(server, clock: clock, requestTimeout: const Duration(milliseconds: 50));
+    track(queue, screenView());
+
+    server.hang = true;
+    await queue.flush();
+    expect(server.requests, hasLength(1));
+    expect(queue.size, 1);
+
+    server.hang = false;
+    clock.advance(const Duration(seconds: 5));
+    await queue.flush();
+    expect(server.requests, hasLength(2));
+    expect(queue.size, 0);
+  });
+
+  test('only the size cap drops a waiting event, the oldest first', () async {
+    final clock = Clock();
+    final queue = await openQueue(server, clock: clock, maxQueueSize: 10);
+    server.status = 503;
+    final sent = [for (var i = 0; i < 12; i++) screenView()];
+    for (final e in sent) {
+      track(queue, e);
+      await queue.flush();
+      clock.advance(const Duration(minutes: 10));
+    }
+    expect(queue.size, 10);
+
+    server.status = 200;
+    await queue.flush();
+    expect(server.eventIds(server.requests.length - 1), [for (final e in sent.skip(2)) idOf(e)]);
+    expect(queue.size, 0);
   });
 
   test('each merged entry keeps its own retry count', () async {
@@ -256,7 +431,8 @@ void main() {
         {'id': 'saved-1', 'endpoint': eventUrl, 'payload': jsonEncode(payload(old)), 'retries': 2},
       ]),
     });
-    final queue = await openQueue(server);
+    final clock = Clock();
+    final queue = await openQueue(server, clock: clock);
     expect(queue.size, 1);
     final fresh = screenView();
     track(queue, fresh);
@@ -264,13 +440,15 @@ void main() {
     server.status = 503;
     await queue.flush();
     expect(server.eventIds(0), [idOf(old), idOf(fresh)]);
-    // The old entry had its last try; the fresh one has had one.
-    expect(queue.size, 1);
-    expect(((await savedQueue()).single as Map)['retries'], 1);
+    // A third try no longer drops the old entry (4.16.2): both wait, each
+    // with its own count.
+    expect(queue.size, 2);
+    expect([for (final e in await savedQueue()) (e as Map)['retries']], [3, 1]);
 
     server.status = 200;
+    clock.advance(const Duration(seconds: 5));
     await queue.flush();
-    expect(server.eventIds(1), [idOf(fresh)]);
+    expect(server.eventIds(1), [idOf(old), idOf(fresh)]);
     expect(queue.size, 0);
   });
 }

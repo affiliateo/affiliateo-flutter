@@ -230,9 +230,12 @@ class Affiliateo with WidgetsBindingObserver {
     _instance._queue = EventQueue(
       flushIntervalMs: flushIntervalMs,
       maxQueueSize: maxQueueSize,
+      // Its debug lines (a refused request, 4.16.2) go through _log.
+      log: (message) => _instance._log(message),
     );
 
-    // Listen for app lifecycle (foreground keep-alive only). Screens are
+    // Listen for app lifecycle (the foreground keep-alive, and since 4.16.2
+    // a flush as the app leaves the screen). Screens are
     // NOT auto-tracked. the host app calls Affiliateo.page(name) per
     // screen, matching the Mixpanel / Amplitude mobile model.
     // predictable + debuggable + no ghost events.
@@ -740,9 +743,11 @@ class Affiliateo with WidgetsBindingObserver {
   }
 
   /// Force-drain the event queue immediately. Useful before a known
-  /// unrecoverable transition (entering an in-app purchase flow, app
-  /// about to be backgrounded for a long time). Best-effort: if offline
-  /// the flush noops and events stay queued for the next retry cycle.
+  /// unrecoverable transition (entering an in-app purchase flow).
+  /// Best-effort: if offline, or while the queue waits after the server was
+  /// busy or out of reach (4.16.2), the flush noops and events stay queued
+  /// for the next try. The SDK flushes on its own as the app leaves the
+  /// screen (4.16.2).
   static Future<void> flush() async {
     _instance._log('flush requested');
     await _instance._queue?.flush();
@@ -1267,6 +1272,12 @@ class Affiliateo with WidgetsBindingObserver {
       // handles rotation based on the 10-minute inactivity timeout. No
       // background screen_view. that was a ghost event polluting funnels.
       _sendSessionEvent('session_start');
+    } else if (state == AppLifecycleState.inactive || state == AppLifecycleState.paused) {
+      // Leaving the screen (4.16.2): send what is waiting now rather than at
+      // the next launch, while the phone still gives the app a few seconds.
+      // A second call while the first is on its way does nothing.
+      final queue = _queue;
+      if (queue != null) unawaited(queue.flush());
     }
   }
 

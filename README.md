@@ -11,7 +11,7 @@ dependencies:
   affiliateo:
     git:
       url: https://github.com/affiliateo/affiliateo-flutter
-      ref: 4.16.1
+      ref: 4.16.2
 ```
 
 Then run `flutter pub get`.
@@ -102,6 +102,17 @@ RevenueCat's `$RCAnonymousID:...`, anything over 128 characters) are skipped,
 and nothing is sent while the person has opted out. **No email address is
 ever sent:** when you pass `email`, the SDK sends only its SHA-256 (see below),
 and nothing else about the person.
+
+### What changed in 4.16.2
+
+- Tracking events wait instead of being lost. When the server is busy or out
+  of reach, the events stay on the phone and are sent again after 5 seconds,
+  then 10, 20 and so on up to about 5 minutes, never sooner than the server
+  asks. They used to be dropped after three tries. Only events the server
+  refuses are dropped, with one line in the debug log.
+- The events still waiting are sent as the app leaves the screen, and a
+  request with no answer is given up after 20 seconds. Nothing to change in
+  your code.
 
 ### What changed in 4.16.1
 
