@@ -1,4 +1,4 @@
-/// Affiliateo SDK for Flutter — mobile affiliate attribution, session tracking and Live Chat.
+/// Affiliateo SDK for Flutter: mobile affiliate attribution, session tracking and Live Chat.
 library affiliateo;
 
 export 'src/affiliateo.dart';

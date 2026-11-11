@@ -15,6 +15,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'chat.dart';
 import 'chat_rules.dart';
+import 'chat_rules.dart' as chat_rules show isChatNotification;
 import 'free_access.dart';
 import 'models.dart';
 import 'queue.dart';
@@ -249,7 +250,7 @@ class Affiliateo with WidgetsBindingObserver {
   /// Returns immediately; the queue handles delivery + retry.
   static Future<void> page(String screenName, [Map<String, dynamic>? metadata]) async {
     // Live Chat's page rules follow the screen, opted out or not.
-    if (screenName.isNotEmpty) LiveChat.instance.screen.value = screenName;
+    LiveChat.instance.setScreen(screenName);
     if (_instance._optedOut) return;
     _instance._log('page', {'screen': screenName, 'metadata': metadata});
     _instance._enqueueEvent({
@@ -341,6 +342,10 @@ class Affiliateo with WidgetsBindingObserver {
     // Somebody else on this phone starts their own Live Chat thread
     // (signing in from anonymous keeps the one they had).
     if (previousUser != null && previousUser != uid) await LiveChat.instance.forget();
+    // Replies to this person's chat find the phone under their id (4.17.0):
+    // it is registered again at once when they signed in from anonymous, and
+    // after a switch of person only once they have a thread of their own.
+    if (changed) LiveChat.instance.syncPush();
     if (changed || hadPendingLogout || hashChanged) await _saveUserState();
     // Already confirmed this launch: nothing to send.
     if (_syncedUser == uid && _syncedEmailHash == _emailHash) return;
@@ -726,6 +731,9 @@ class Affiliateo with WidgetsBindingObserver {
   static Future<void> optOut() async {
     _instance._log('optOut');
     _instance._optedOut = true;
+    // The chat carries no device id from now on, so no reply could find this
+    // phone: Affiliateo forgets its push token (4.17.0).
+    LiveChat.instance.syncPush();
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_optOutKey, 'true');
     await _instance._queue?.clear();
@@ -738,6 +746,8 @@ class Affiliateo with WidgetsBindingObserver {
   static Future<void> optIn() async {
     _instance._log('optIn');
     _instance._optedOut = false;
+    // The phone may get its chat replies as notifications again (4.17.0).
+    LiveChat.instance.syncPush();
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_optOutKey);
   }
@@ -1096,6 +1106,91 @@ class Affiliateo with WidgetsBindingObserver {
     LiveChat.instance.want();
     return LiveChat.instance.state;
   }
+
+  /// How often the chat bubble wiggles (4.17.0), over the Wiggle setting in
+  /// your dashboard: a whole number of [seconds] between two wiggles, 3 or
+  /// more. 0 or null is no wiggle. Never call it and the dashboard decides.
+  /// `AffiliateoChat(wiggleSeconds: ...)` wins over this when both are set.
+  ///
+  /// ```dart
+  /// Affiliateo.setChatBubbleWiggle(seconds: 20);
+  /// ```
+  static void setChatBubbleWiggle({required int? seconds}) => LiveChat.instance.setWiggle(seconds);
+
+  // ── Live Chat notifications (4.17.0) ───────────────────────────────────
+
+  /// Hand the SDK this phone's push token (4.17.0), so a reply from your
+  /// team arrives as a notification while the app is closed or in the
+  /// background: the phone draws it by itself, with your Live Chat app's name
+  /// and the message. Call it whenever your push plugin gives you a token:
+  /// at launch once notifications are allowed, and when the token changes.
+  ///
+  /// [platform] is `'ios'` or `'android'`, and says which token it is:
+  ///
+  /// - `'ios'`: the APNs device token, in hex (firebase_messaging's
+  ///   `getAPNSToken()`). Not a Firebase token.
+  /// - `'android'`: the Firebase (FCM) registration token (`getToken()`).
+  ///
+  /// The SDK reads the bundle id (iPhone) or package name (Android) itself;
+  /// pass [bundleId] when the token belongs to another one. [environment] is
+  /// for iPhone only, `'sandbox'` or `'production'`: left out, a debug or
+  /// profile build counts as sandbox and a release build as production, and
+  /// the server corrects a wrong guess.
+  ///
+  /// Safe to call before [configure] has finished and as often as you like:
+  /// the same token is sent once. [logout] takes the phone off the list
+  /// until the next person has a chat of their own, and nothing is
+  /// registered while the person has opted out.
+  ///
+  /// ```dart
+  /// final token = Platform.isIOS
+  ///     ? await FirebaseMessaging.instance.getAPNSToken()
+  ///     : await FirebaseMessaging.instance.getToken();
+  /// if (token != null) {
+  ///   Affiliateo.registerChatPushToken(token, Platform.isIOS ? 'ios' : 'android');
+  /// }
+  /// ```
+  static void registerChatPushToken(String token, String platform, {String? bundleId, String? environment}) {
+    LiveChat.instance.setPushToken(
+      token,
+      platform: platform.trim().toLowerCase(),
+      bundleId: bundleId,
+      environment: environment,
+    );
+  }
+
+  /// Whether a notification is a Live Chat reply from Affiliateo (4.17.0).
+  /// Pass what your push plugin hands you as the notification's data
+  /// (firebase_messaging's `message.data`); the whole message as a map works
+  /// too. Use it to leave chat notifications out of your own handling.
+  static bool isChatNotification(Object? data) => chat_rules.isChatNotification(data);
+
+  /// Hand the SDK the data of a notification the person tapped (4.17.0).
+  /// True when it was a Live Chat reply: the chat opens, on top of whatever
+  /// screen the app is on. Also right after a cold start: the request is
+  /// kept until [configure] has finished and the app has a screen to open it
+  /// on. False for any other notification, which is yours to handle.
+  ///
+  /// ```dart
+  /// FirebaseMessaging.onMessageOpenedApp.listen((message) {
+  ///   if (Affiliateo.handleChatNotification(message.data)) return;
+  ///   // your own notifications
+  /// });
+  /// ```
+  static bool handleChatNotification(Object? data) {
+    if (!chat_rules.isChatNotification(data)) return false;
+    LiveChat.instance.openFromNotification();
+    return true;
+  }
+
+  /// Tell the SDK the person allows notifications (4.17.0): call it right
+  /// after they say yes, and at each launch when they already had. A
+  /// greeting nobody on this phone has seen yet then shows ONCE as a banner
+  /// at the top of the screen (in the phone's language when you wrote the
+  /// greeting in it), and a tap on it opens the chat. The red 1 stays until
+  /// the chat is opened. Called before the chat is ready, it happens once it
+  /// is. The banner is drawn by [AffiliateoChat], so place it.
+  static void chatNotificationsAllowed() => LiveChat.instance.notificationsAllowed();
 
   // ── Store prices (4.15.4) ──────────────────────────────────────────────
 

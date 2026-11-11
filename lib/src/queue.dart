@@ -334,7 +334,7 @@ class EventQueue {
         }
       }
     } catch (_) {
-      // Corrupt or wrong-shape entries — reset rather than crash on
+      // Corrupt or wrong-shape entries: reset rather than crash on
       // load. Better to drop a few stuck events than block all future
       // tracking on a parse error.
       _queue.clear();
@@ -352,7 +352,7 @@ class EventQueue {
       }).toList();
       await prefs.setString(_storageKey, jsonEncode(serialized));
     } catch (_) {
-      // Quota / I/O error — swallow.
+      // Quota / I/O error: swallow.
     }
   }
 
@@ -361,7 +361,7 @@ class EventQueue {
     _flushTimer = Timer.periodic(
       // NOT const. _flushIntervalMs is an instance field assigned in the
       // constructor's initializer list from a clamped constructor argument,
-      // so its value is only known at runtime — `const` here is the
+      // so its value is only known at runtime: `const` here is the
       // invalid_constant error this file failed analysis on.
       Duration(milliseconds: _flushIntervalMs),
       (_) => unawaited(flush()),

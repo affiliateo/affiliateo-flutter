@@ -28,7 +28,7 @@ import 'affiliateo.dart';
 ///
 /// Metadata equality uses a [DeepCollectionEquality]-style hash via
 /// jsonEncode so a caller passing a fresh map literal each rebuild
-/// doesn't re-fire — only a logically-different payload triggers a
+/// doesn't re-fire: only a logically-different payload triggers a
 /// fresh page() call. Cheap on small maps.
 class TrackedScreen extends StatefulWidget {
   const TrackedScreen({
@@ -45,7 +45,7 @@ class TrackedScreen extends StatefulWidget {
   /// Optional metadata payload (plan tier, A/B variant, etc).
   final Map<String, dynamic>? metadata;
 
-  /// The screen content to render. TrackedScreen is fully transparent —
+  /// The screen content to render. TrackedScreen is fully transparent:
   /// it doesn't impose any layout or styling, just wraps the firing.
   final Widget child;
 
@@ -82,7 +82,7 @@ class _TrackedScreenState extends State<TrackedScreen> {
   String _metaKey(Map<String, dynamic>? meta) {
     if (meta == null) return '';
     try {
-      // Sort keys for stability — `{a:1, b:2}` and `{b:2, a:1}` are the
+      // Sort keys for stability: `{a:1, b:2}` and `{b:2, a:1}` are the
       // same logical payload, shouldn't trigger a re-fire.
       final sorted = SplayTreeMap<String, dynamic>.from(meta);
       return sorted.toString();

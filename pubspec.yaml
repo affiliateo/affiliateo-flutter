@@ -1,5 +1,27 @@
 name: affiliateo
 description: Mobile affiliate attribution, session tracking and Live Chat for Flutter apps.
+# 4.17.0: Live Chat replies as notifications, and the bubble wiggles.
+#   Wiggle: every few seconds the bubble does one smooth 0.9 second wiggle
+#   (the whole bubble, with its red number and green dot), set by Wiggle in
+#   the dashboard (config bubble.wiggle_seconds), by
+#   Affiliateo.setChatBubbleWiggle(seconds: ...) or by
+#   AffiliateoChat(wiggleSeconds: ...). Never with Reduce Motion on.
+#   Notifications: Affiliateo.registerChatPushToken(token, platform) hands
+#   over the phone's push token (the APNs token on iPhone, the Firebase token
+#   on Android) so the phone itself draws a reply while the app is closed or
+#   in the background; Affiliateo.handleChatNotification(data) opens the chat
+#   from a tapped notification, also after a cold start;
+#   Affiliateo.isChatNotification(data) says whether a notification is a chat
+#   reply. With the app open, AffiliateoChat draws the SDK's own banner for a
+#   reply (inAppBanner, on by default), and after
+#   Affiliateo.chatNotificationsAllowed() a greeting nobody has seen shows as
+#   a banner once, in the phone's language (config greetings). logout(),
+#   reset(), a different user signing in and optOut() take the phone off
+#   Affiliateo's list.
+#   Fixed: Affiliateo.page() called from a screen's initState() with the
+#   bubble placed logged "setState() or markNeedsBuild() called during build"
+#   in debug builds.
+#   No new dependencies (one for the tests only), no API removed or changed.
 # 4.16.2: tracking events wait instead of being lost. When the server is
 #   busy or out of reach (no answer, a time out, 404, 408, 429 or 5xx) the
 #   queue keeps the events and tries again after 5 seconds, then 10, 20 and
@@ -89,7 +111,7 @@ description: Mobile affiliate attribution, session tracking and Live Chat for Fl
 # paid-ad install (Meta / TikTok / Google Ads) gets its source labelled
 # server-side with zero merchant work. Additive, no API changes.
 # 3.0.0: event queue + reset/optOut/optIn/flush + TrackedScreen widget.
-version: 4.16.2
+version: 4.17.0
 homepage: https://affiliateo.com
 repository: https://github.com/affiliateo/affiliateo-flutter
 
@@ -132,3 +154,6 @@ dependencies:
 dev_dependencies:
   flutter_test:
     sdk: flutter
+  # Tests only (4.17.0): a stand-in web view, so a test can open the chat
+  # sheet. Apps never get it from here; webview_flutter brings its own.
+  webview_flutter_platform_interface: ">=2.3.0 <3.0.0"

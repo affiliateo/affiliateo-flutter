@@ -11,7 +11,7 @@ dependencies:
   affiliateo:
     git:
       url: https://github.com/affiliateo/affiliateo-flutter
-      ref: 4.16.2
+      ref: 4.17.0
 ```
 
 Then run `flutter pub get`.
@@ -102,6 +102,27 @@ RevenueCat's `$RCAnonymousID:...`, anything over 128 characters) are skipped,
 and nothing is sent while the person has opted out. **No email address is
 ever sent:** when you pass `email`, the SDK sends only its SHA-256 (see below),
 and nothing else about the person.
+
+### What changed in 4.17.0
+
+- The chat bubble wiggles: one short wiggle every few seconds, set by Wiggle
+  in the dashboard's Live Chat settings (off, or every 10 to 60 seconds), by
+  `Affiliateo.setChatBubbleWiggle(seconds: 20)` or by
+  `AffiliateoChat(wiggleSeconds: 20)`. Never with Reduce Motion on.
+- Notifications for replies, with nothing extra to install: the phone shows a
+  reply while the app is closed (`Affiliateo.registerChatPushToken(token,
+  platform)` hands the SDK the push token, and
+  `Affiliateo.handleChatNotification(data)` opens the chat from a tapped
+  notification), and `AffiliateoChat` shows its own banner while the app is
+  open (`inAppBanner`). `Affiliateo.chatNotificationsAllowed()` brings the
+  greeting as a banner once, in the phone's language when you wrote the
+  greeting in it. `Affiliateo.isChatNotification(data)` tells you a
+  notification is a chat reply. See Notifications under Live Chat.
+- Fixed: calling `Affiliateo.page(name)` from a screen's `initState()` while
+  the bubble was placed logged "setState() or markNeedsBuild() called during
+  build" in debug builds. The bubble now follows the new screen right after
+  that frame.
+- No new packages, and nothing to change in code you already have.
 
 ### What changed in 4.16.2
 
@@ -426,9 +447,24 @@ AffiliateoChat(
   corner: AffiliateoChatCorner.bottomLeft,
   size: 52,                              // 40 to 80
   bottomPadding: 72,                     // room for a tab bar
+  wiggleSeconds: 20,                     // a wiggle every 20 seconds; 0 for none
   child: child!,
 )
 ```
+
+**The wiggle (4.17.0).** Every few seconds the bubble does one short wiggle so
+people notice it, then rests. Wiggle in the Live Chat settings of your
+dashboard sets how often: off, or every 10 to 60 seconds. Your own number wins
+over it: any whole number of seconds, 3 or more, and `0` for no wiggle.
+
+```dart
+Affiliateo.setChatBubbleWiggle(seconds: 20);   // from anywhere; 0 or null for no wiggle
+AffiliateoChat(wiggleSeconds: 20, child: child!) // or on the widget, which wins when both are set
+```
+
+It only wiggles while the bubble is on screen, the chat is closed and the app
+is in front, never while it is being dragged, and never on a phone with
+Reduce Motion on (Android: "Remove animations").
 
 The bubble is for your app's pages: sheets, dialogs and full-screen pop-ups
 (`fullscreenDialog: true`) cover it, on your main navigator or a tab's own
@@ -448,6 +484,114 @@ phone starts a new conversation. The sheet loads only your app's own chat
 page, and a link opens in the browser only when the person taps it in a
 message from your team. The device, visitor and user ids go to your inbox as
 labels, and are left out while the person has opted out of tracking.
+
+### Notifications (4.17.0)
+
+When you reply, the person sees it like a text message: your app's name and
+your message, and a tap opens the chat on top of whatever screen they were on.
+Flutter cannot post a system notification by itself, and this SDK does not
+make you install a notifications package for it. So it works in two parts:
+
+- **App closed or in the background: the phone shows it.** You hand the SDK
+  the push token your app already gets, and Affiliateo sends the reply as a
+  push the phone draws by itself (an alert on iPhone, a notification message
+  on Android).
+- **App open: the SDK shows its own banner.** A card slides down at the top of
+  the screen with your logo, the app's name and the message, stays 5 seconds
+  and slides away. A tap opens the chat, a swipe up sends it away. Nothing
+  shows while the chat itself is open. No package needed, and it also works
+  with no push set up at all.
+
+With `firebase_messaging` (any push package works the same way: the SDK only
+needs the token and the tapped notification's data):
+
+```dart
+import 'dart:io' show Platform;
+
+import 'package:affiliateo/affiliateo.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
+
+Future<void> setUpChatNotifications() async {
+  final messaging = FirebaseMessaging.instance;
+
+  // 1. Hand over the phone's push token whenever you get one: at launch once
+  //    notifications are allowed, and when it changes.
+  //    iPhone: the APNs token. Android: the Firebase token.
+  Future<void> handOverToken() async {
+    if (Platform.isIOS) {
+      final token = await messaging.getAPNSToken();
+      if (token != null) Affiliateo.registerChatPushToken(token, 'ios');
+    } else {
+      final token = await messaging.getToken();
+      if (token != null) Affiliateo.registerChatPushToken(token, 'android');
+    }
+  }
+
+  await handOverToken();
+  messaging.onTokenRefresh.listen((_) => handOverToken());
+
+  // 2. When the person taps a notification, hand its data to the SDK. It
+  //    returns true and opens the chat when it was a chat reply.
+  FirebaseMessaging.onMessageOpenedApp.listen((message) {
+    if (Affiliateo.handleChatNotification(message.data)) return;
+    // your own notifications
+  });
+
+  //    The tap that started the app:
+  final first = await messaging.getInitialMessage();
+  if (first != null && !Affiliateo.handleChatNotification(first.data)) {
+    // your own notifications
+  }
+
+  // 3. Right after the person allows notifications (and at each launch when
+  //    they already had), say so. A greeting they have not seen yet then
+  //    shows once as a banner.
+  final settings = await messaging.getNotificationSettings();
+  if (settings.authorizationStatus == AuthorizationStatus.authorized) {
+    Affiliateo.chatNotificationsAllowed();
+  }
+}
+```
+
+- The banner is part of `AffiliateoChat`, so place it. It shows over any
+  screen, also with `visible: false` (an app with its own chat button and no
+  bubble). Turn it off with `AffiliateoChat(inAppBanner: false, child: child!)`
+  when your app shows chat notifications itself while it is open (for
+  example with `setForegroundNotificationPresentationOptions(alert: true)` on
+  iPhone, which would show both).
+- `Affiliateo.handleChatNotification(data)` works with or without the bubble
+  placed, and right after a cold start: it waits until `configure()` has
+  finished and your app has a screen. `Affiliateo.isChatNotification(data)`
+  only tells you whether a notification is a chat reply.
+- On iPhone pass the APNs token (`getAPNSToken()`), which is hex. A Firebase
+  token does not work there: Affiliateo sends an iPhone's replies through
+  Apple.
+- On iPhone, `firebase_messaging` calls `onMessageOpenedApp` only for
+  notifications that were sent through Firebase, and Affiliateo's go straight
+  to Apple. So with that package a tap on iPhone while your app is in the
+  background brings the app to the front, and the bubble shows the red
+  number, but the chat does not open by itself unless your app passes the
+  tapped notification's data on (from its `AppDelegate`, or with a push
+  package that hands over every tapped notification). On Android the tap
+  opens the chat as shown above.
+- The SDK reads your bundle id (iPhone) or package name (Android) itself.
+  When the token belongs to another one, pass it:
+  `Affiliateo.registerChatPushToken(token, 'ios', bundleId: 'com.you.app')`.
+  `environment: 'sandbox'` or `'production'` (iPhone only) says which of
+  Apple's services the token is for; left out, a debug or profile build counts
+  as sandbox and a release build as production, and a wrong guess is corrected
+  on the server.
+- Today the pushes are sent with Affiliateo's own Apple and Firebase keys, so
+  they only reach apps set up with Affiliateo. Sending with your own keys
+  will come later. The banner in the open app works for every app.
+- Nothing is registered while the person has opted out of tracking, and
+  `optOut()` takes a registered phone off the list.
+- `logout()` and `reset()` take the phone off the list, and it is registered
+  again once the next person sends their first message, so a reply to the last
+  person's chat never shows up for whoever holds the phone next. Call
+  `identify()` before `registerChatPushToken()` when your app has sign-in: a
+  reply reaches a phone only when it is registered for the same user the chat
+  belongs to.
 
 ## Store prices
 

@@ -11,10 +11,12 @@ import 'package:flutter/scheduler.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
+import 'chat_push.dart';
 import 'chat_rules.dart';
 import 'chat_token_store.dart';
 
@@ -47,6 +49,19 @@ import 'chat_token_store.dart';
 // placed and the app is in front, the app's own channel brings the owner's
 // on/off switch and the team's Online switches at once (a `config` frame,
 // applied as a fresh config read is).
+//
+// 4.17.0: the bubble wiggles every so often (the owner's seconds, or the
+// app's own with AffiliateoChat(wiggleSeconds:); one smooth 0.9 s wiggle of
+// the whole bubble, chat_rules.dart wiggleAngle), and a reply shows as a
+// notification, like a message. The app hands over its push token
+// (Affiliateo.registerChatPushToken) and the phone itself draws the
+// notification while the app is closed or in the background; the app passes
+// a tapped notification's data to Affiliateo.handleChatNotification, which
+// opens the chat over whatever is on screen. With the app open the SDK draws
+// a banner of its own at the top of the screen (AffiliateoChat's
+// inAppBanner), and once the app says notifications are allowed
+// (Affiliateo.chatNotificationsAllowed) a greeting nobody has seen shows as
+// one too, once.
 
 /// The chat's state, for a button of your own (`Affiliateo.chatState`).
 @immutable
@@ -238,7 +253,7 @@ class LiveChat extends ChangeNotifier with WidgetsBindingObserver {
   static const _timeout = Duration(seconds: 15);
 
   ChatEnv? _env;
-  final ChatTokenStore _tokens = ChatTokenStore(_SecureStore(), _PrefsStore());
+  ChatTokenStore _tokens = ChatTokenStore(_SecureStore(), _PrefsStore());
 
   /// What `Affiliateo.chatState` hands out.
   final ValueNotifier<AffiliateoChatState> state = ValueNotifier(const AffiliateoChatState());
@@ -249,8 +264,98 @@ class LiveChat extends ChangeNotifier with WidgetsBindingObserver {
   /// The dashboard's bubble (corner, size, screens, colors).
   ChatBubbleConfig dashboardBubble = const ChatBubbleConfig();
 
+  /// The whole config as the server last answered it (whose chat it is and
+  /// the greeting, for the banner).
+  ChatConfig _config = ChatConfig.off;
+
+  /// The banner on show (4.17.0): a reply, or the greeting. AffiliateoChat
+  /// draws it.
+  final ValueNotifier<ChatBanner?> banner = ValueNotifier<ChatBanner?>(null);
+
+  /// AffiliateoChat widgets placed with `inAppBanner` on: a banner shows only
+  /// while there is one to draw it.
+  int _bannerPlaces = 0;
+
+  /// The app said notifications are allowed (chatNotificationsAllowed), in
+  /// this launch.
+  bool _allowed = false;
+
+  /// Greetings shown as a banner in this launch ("app:greeting id"): holds
+  /// also when the phone's storage does not.
+  final Set<String> _greetingsShown = <String>{};
+  bool _greetingBusy = false;
+
+  /// A tapped notification's chat (handleChatNotification), waiting for the
+  /// SDK to be configured, the app to be in front and a navigator to open on.
+  bool _openPending = false;
+  int _openTries = 0;
+  Timer? _openRetry;
+
+  /// How the placed AffiliateoChat widgets find the app's navigator.
+  final Set<NavigatorState? Function()> _navigators = <NavigatorState? Function()>{};
+
+  // The push token the app handed over (registerChatPushToken).
+  String? _pushToken;
+  String? _pushPlatform;
+  String? _pushBundleId;
+  String? _pushEnvironment;
+
+  /// The app's own bundle id or package name, read once. Until the read has
+  /// answered, nothing is registered: an iPhone's token is no use without it.
+  String? _ownBundleId;
+  bool _ownBundleIdKnown = false;
+  Future<String?>? _ownBundleIdRead;
+
+  /// Keeps Affiliateo's list of phones in step with this one (chat_push.dart).
+  late ChatPushRegistrar _push = _newPushRegistrar();
+
+  ChatPushRegistrar _newPushRegistrar() => ChatPushRegistrar(
+        store: _PrefsStore(),
+        send: _sendPush,
+        state: _pushState,
+        hasThread: (appId) async => await _loadToken(appId) != null,
+        log: (message) => _env?.log(message),
+      );
+
   /// The send color and placeholder the app's own code set (AffiliateoChat).
   ChatLook widgetLook = const ChatLook();
+
+  /// The app's own seconds between two wiggles (setChatBubbleWiggle, 4.17.0):
+  /// 0 for none, null while the app never said (the dashboard decides).
+  int? _codeWiggle;
+  int? get codeWiggle => _codeWiggle;
+
+  /// The app's own wiggle time, over the dashboard's: null and 0 are off.
+  void setWiggle(int? seconds) {
+    _codeWiggle = wiggleOverride(seconds ?? 0);
+    _afterBuild(notifyListeners);
+  }
+
+  /// The app named the screen on show (page()): the bubble's page rules
+  /// follow it.
+  void setScreen(String name) {
+    if (name.isEmpty || name == screen.value) return;
+    _afterBuild(() => screen.value = name);
+  }
+
+  /// Runs [change] now, or right after this frame when the app is in the
+  /// middle of building one (4.17.0). The SDK is often called from a
+  /// screen's initState() (page() is), and the bubble sits above that
+  /// screen: telling it to redraw while the frame is still being built is an
+  /// error in Flutter ("setState() or markNeedsBuild() called during build").
+  void _afterBuild(VoidCallback change) {
+    var building = false;
+    try {
+      building = SchedulerBinding.instance.schedulerPhase == SchedulerPhase.persistentCallbacks;
+    } catch (_) {
+      // No Flutter binding yet (the app has not started drawing): nothing to wait for.
+    }
+    if (building) {
+      SchedulerBinding.instance.addPostFrameCallback((_) => change());
+    } else {
+      change();
+    }
+  }
 
   bool _known = false;
   bool _enabled = false;
@@ -304,9 +409,16 @@ class LiveChat extends ChangeNotifier with WidgetsBindingObserver {
     if (_forgetPending) {
       _forgetPending = false;
       unawaited(_tokens.clear(env.appId));
+      unawaited(_push.forget(env.appId, token: _pushToken, platform: _pushPlatform));
     }
     if (_wanted) _start();
+    // What the app asked for before configure() had finished (4.17.0).
+    syncPush();
+    _tryPendingOpen();
   }
+
+  /// The app is in front (the wiggle and the banner wait for it).
+  bool get active => _active;
 
   /// Something in the app uses the chat (the bubble, chatState, openChat or
   /// chatAvailable). Until then the SDK asks the server nothing about it.
@@ -331,9 +443,19 @@ class LiveChat extends ChangeNotifier with WidgetsBindingObserver {
     if (_active) {
       unawaited(_refreshConfig());
       unawaited(_refreshUnread());
+      // A registration that got no answer is tried again, and a tapped
+      // notification's chat opens now that the app is in front (4.17.0).
+      syncPush();
+      _tryPendingOpen();
+      unawaited(_showGreetingIfDue());
+    } else {
+      // A banner is for the app in front.
+      banner.value = null;
     }
     _syncSocket();
     _syncAppChannel();
+    // The bubble's wiggle rests while the app is at the back.
+    notifyListeners();
   }
 
   /// An AffiliateoChat came on screen: the app channel runs while one is.
@@ -364,6 +486,11 @@ class LiveChat extends ChangeNotifier with WidgetsBindingObserver {
     bool online = false,
     int unread = 0,
     ChatBubbleConfig bubble = const ChatBubbleConfig(),
+    String? name,
+    String? logoUrl,
+    String? greeting,
+    Map<String, String> greetings = const <String, String>{},
+    bool greetingPending = false,
   }) {
     _known = true;
     _enabled = enabled;
@@ -371,6 +498,17 @@ class LiveChat extends ChangeNotifier with WidgetsBindingObserver {
     _online = online;
     _unread = unread;
     dashboardBubble = bubble;
+    _config = ChatConfig(
+      enabled: enabled,
+      showBubble: showBubble,
+      online: online,
+      bubble: bubble,
+      name: name,
+      logoUrl: logoUrl,
+      greeting: greeting,
+      greetings: greetings,
+    );
+    _greetingPending = enabled && greetingPending;
     _publish();
   }
 
@@ -378,7 +516,72 @@ class LiveChat extends ChangeNotifier with WidgetsBindingObserver {
   @visibleForTesting
   void debugAppFrame(String text) => _appFrame(text);
 
-  void _publish() {
+  /// Tests only: a frame as if it came on the thread's socket.
+  @visibleForTesting
+  void debugFrame(String text) => _frame(text);
+
+  /// Tests only: the app as if it were in front, or at the back.
+  @visibleForTesting
+  void debugActive(bool active) {
+    _active = active;
+    if (!active) banner.value = null;
+    notifyListeners();
+  }
+
+  /// Tests only: back to a chat nobody has used and an SDK that is not
+  /// configured yet. Call it inside the test: the stores keep their work in
+  /// a line, and a line started in one test's clock never moves in the next.
+  @visibleForTesting
+  void debugReset() {
+    _tokens = ChatTokenStore(_SecureStore(), _PrefsStore());
+    _push = _newPushRegistrar();
+    _ownBundleId = null;
+    _ownBundleIdKnown = false;
+    _ownBundleIdRead = null;
+    _pushToken = null;
+    _pushPlatform = null;
+    _pushBundleId = null;
+    _pushEnvironment = null;
+    _token = null;
+    _openRetry?.cancel();
+    _openRetry = null;
+    _openPending = false;
+    _openTries = 0;
+    _allowed = false;
+    _greetingsShown.clear();
+    _greetingPending = false;
+    _codeWiggle = null;
+    banner.value = null;
+    _known = false;
+    _enabled = false;
+    _showBubble = false;
+    _online = false;
+    _unread = 0;
+    _sheet = null;
+    _isOpen = false;
+    _active = true;
+    _config = ChatConfig.off;
+    dashboardBubble = const ChatBubbleConfig();
+    _env = null;
+    _forgetPending = false;
+    _appRefused = false;
+    _publish();
+  }
+
+  /// Tests only: as if configure() had finished, without asking the server
+  /// anything (the app channel counts as refused, so no socket opens).
+  @visibleForTesting
+  void debugConfigured(ChatEnv env) {
+    _env = env;
+    _wanted = true;
+    _appRefused = true;
+    _tryPendingOpen();
+    unawaited(_showGreetingIfDue());
+  }
+
+  void _publish() => _afterBuild(_publishNow);
+
+  void _publishNow() {
     state.value = AffiliateoChatState(
       enabled: _enabled,
       showBubble: _enabled && _showBubble,
@@ -386,9 +589,12 @@ class LiveChat extends ChangeNotifier with WidgetsBindingObserver {
       unread: _unread + (_greetingPending ? 1 : 0),
       isOpen: _isOpen,
     );
+    // Never a banner over the open chat, and none left over once the chat is off.
+    if (_isOpen || !_enabled) banner.value = null;
     notifyListeners();
     _syncSocket();
     _syncAppChannel();
+    unawaited(_showGreetingIfDue());
   }
 
   Future<String?> _loadToken(String appId) async {
@@ -429,6 +635,7 @@ class LiveChat extends ChangeNotifier with WidgetsBindingObserver {
     _showBubble = config.showBubble;
     _online = config.online;
     dashboardBubble = config.bubble;
+    _config = config;
     final greetingId = config.enabled ? dashboardBubble.greetingId : null;
     if (greetingId == null || env == null) {
       _greetingPending = false;
@@ -439,6 +646,8 @@ class LiveChat extends ChangeNotifier with WidgetsBindingObserver {
       _greetingPending = token == null && seen != greetingId;
     }
     _publish();
+    // The phone is registered for replies once the chat is known to be on (4.17.0).
+    syncPush();
   }
 
   /// A `config` frame from the app channel: kept as a fresh config read
@@ -556,6 +765,9 @@ class LiveChat extends ChangeNotifier with WidgetsBindingObserver {
     _isOpen = false;
     _unread = 0;
     _publish();
+    // A sign-in since the phone was registered: it is registered as that
+    // person now, so their replies find it (the same registration is sent once).
+    syncPush();
   }
 
   /// Closes the chat screen when it is open.
@@ -577,6 +789,9 @@ class LiveChat extends ChangeNotifier with WidgetsBindingObserver {
     if (env == null || openedAt != _signOuts) return;
     _token = token;
     unawaited(_tokens.save(env.appId, token));
+    // A thread of their own: after a sign-out the phone may be registered
+    // for its replies again (4.17.0).
+    syncPush();
   }
 
   void _onRead() {
@@ -594,6 +809,11 @@ class LiveChat extends ChangeNotifier with WidgetsBindingObserver {
     _token = null;
     _unread = 0;
     _visitorOnline = false;
+    // Nor does their banner, or the chat their tapped notification asked for.
+    _afterBuild(() => banner.value = null);
+    _openPending = false;
+    _openRetry?.cancel();
+    _openRetry = null;
     close();
     _publish();
     final env = _env;
@@ -601,7 +821,213 @@ class LiveChat extends ChangeNotifier with WidgetsBindingObserver {
       _forgetPending = true;
       return;
     }
-    await _tokens.clear(env.appId);
+    final cleared = _tokens.clear(env.appId);
+    // The server forgets this phone too (4.17.0): a reply to the last
+    // person's thread must not show up for whoever holds the phone next. It
+    // is registered again once the next person starts a thread of their own
+    // (asked after the key above is gone, so the last person's does not count).
+    unawaited(_push.forget(env.appId, token: _pushToken, platform: _pushPlatform));
+    await cleared;
+  }
+
+  // ── Notifications (4.17.0) ─────────────────────────────────────────────
+
+  /// The app handed over the phone's push token (registerChatPushToken).
+  void setPushToken(String token, {String? platform, String? bundleId, String? environment}) {
+    final own = Platform.isAndroid ? 'android' : (Platform.isIOS ? 'ios' : null);
+    final phone = platform == 'ios' || platform == 'android' ? platform : own;
+    if (phone == null) {
+      _env?.log('chat: push tokens are for iPhone and Android');
+      return;
+    }
+    _pushToken = token;
+    _pushPlatform = phone;
+    _pushBundleId = bundleId;
+    _pushEnvironment = environment;
+    // The registration needs to know whether the chat is on for this app.
+    want();
+    syncPush();
+  }
+
+  /// Brings Affiliateo's list in line with this phone (chat_push.dart). Safe
+  /// to call as often as anything changes: the same registration is sent once.
+  void syncPush() {
+    if (_env == null) return;
+    unawaited(_syncPush());
+  }
+
+  Future<void> _syncPush() async {
+    // The bundle id or package name, when the app did not pass one: read
+    // before the registration is built, so an iPhone's is never sent without.
+    if (_pushToken != null && _pushBundleId == null && !_ownBundleIdKnown) {
+      _ownBundleId = await (_ownBundleIdRead ??= _readOwnBundleId());
+      _ownBundleIdKnown = true;
+    }
+    await _push.sync();
+  }
+
+  static Future<String?> _readOwnBundleId() async {
+    try {
+      final name = (await PackageInfo.fromPlatform()).packageName;
+      return name.isEmpty ? null : name;
+    } catch (_) {
+      // No such plugin on this platform.
+      return null;
+    }
+  }
+
+  ChatPushState? _pushState() {
+    final env = _env;
+    if (env == null) return null;
+    return ChatPushState(
+      appId: env.appId,
+      chatOn: _known && _enabled,
+      optedOut: env.optedOut(),
+      deviceId: env.deviceId(),
+      visitorId: env.visitorId(),
+      userId: env.userId(),
+      language: _deviceLanguage(),
+      // Not before the bundle id is known (the app's own, or the one it passed).
+      token: _pushBundleId != null || _ownBundleIdKnown ? _pushToken : null,
+      platform: _pushPlatform ?? (Platform.isAndroid ? 'android' : 'ios'),
+      bundleId: _pushBundleId ?? _ownBundleId,
+      // A debug or profile build's token is Apple's sandbox one; a wrong
+      // guess is corrected by the server.
+      environment: _pushEnvironment ?? (kReleaseMode ? 'production' : 'sandbox'),
+    );
+  }
+
+  /// POST or DELETE /api/live-chat/push-devices. No key goes with it: the
+  /// phone is named by the app and its token.
+  Future<ChatPushAnswer> _sendPush(String method, Map<String, String> body) async {
+    final env = _env;
+    if (env == null) return ChatPushAnswer.noAnswer;
+    final url = Uri.parse('${env.apiBase}/api/live-chat/push-devices');
+    const headers = {'Content-Type': 'application/json'};
+    try {
+      final sending = method == 'DELETE'
+          ? http.delete(url, headers: headers, body: jsonEncode(body))
+          : http.post(url, headers: headers, body: jsonEncode(body));
+      final res = await sending.timeout(_timeout);
+      return chatPushAnswer(res.statusCode, res.body);
+    } catch (_) {
+      return ChatPushAnswer.noAnswer;
+    }
+  }
+
+  /// The person tapped a chat notification (handleChatNotification): the
+  /// chat opens over whatever is on screen, as openChat() does. After a cold
+  /// start that is a moment later, so the request is kept until the SDK is
+  /// configured, the app is in front and there is a navigator to open on.
+  void openFromNotification() {
+    _openPending = true;
+    _openTries = 0;
+    want();
+    _afterBuild(_tryPendingOpen);
+  }
+
+  /// An AffiliateoChat came on screen: it knows the app's navigator.
+  void navigatorPlaced(NavigatorState? Function() find) {
+    _navigators.add(find);
+    if (_openPending) {
+      // Once this frame has built the app under it.
+      SchedulerBinding.instance.addPostFrameCallback((_) => _tryPendingOpen());
+    }
+  }
+
+  void navigatorRemoved(NavigatorState? Function() find) => _navigators.remove(find);
+
+  /// The app's navigator: the one a placed AffiliateoChat found, else the
+  /// first one in the app (for an app that opens the chat from its own button).
+  NavigatorState? _hostNavigator() {
+    for (final find in _navigators.toList()) {
+      final navigator = find();
+      if (navigator != null && navigator.mounted) return navigator;
+    }
+    final root = WidgetsBinding.instance.rootElement;
+    if (root == null) return null;
+    final navigator = _navigatorFor(root);
+    return navigator != null && navigator.mounted ? navigator : null;
+  }
+
+  void _tryPendingOpen() {
+    if (!_openPending) return;
+    _openRetry?.cancel();
+    _openRetry = null;
+    // Not configured yet, or at the back: attach() and the app coming to the
+    // front come back here.
+    if (_env == null || !_active) return;
+    final navigator = _hostNavigator();
+    if (navigator == null) {
+      // The app is still building its first screen: a few more looks, for
+      // ten seconds. An app with no navigator at all never opens it.
+      if (_openTries++ < 40) {
+        _openRetry = Timer(const Duration(milliseconds: 250), _tryPendingOpen);
+      } else {
+        _openPending = false;
+        _env?.log('chat: the notification\'s chat was skipped, the app has no Navigator to open it on');
+      }
+      return;
+    }
+    _openPending = false;
+    unawaited(open(navigator));
+  }
+
+  /// The app says notifications are allowed (chatNotificationsAllowed): a
+  /// greeting nobody on this phone has seen shows as a banner, now or as
+  /// soon as the config is here.
+  void notificationsAllowed() {
+    _allowed = true;
+    want();
+    unawaited(_showGreetingIfDue());
+  }
+
+  /// An AffiliateoChat with `inAppBanner` on came on screen.
+  void bannerPlaced() {
+    _bannerPlaces++;
+    unawaited(_showGreetingIfDue());
+  }
+
+  /// It went away (or switched its banner off).
+  void bannerRemoved() {
+    _bannerPlaces = max(0, _bannerPlaces - 1);
+    if (_bannerPlaces == 0) banner.value = null;
+  }
+
+  /// The banner left the screen: its time ran out, it was swiped away or tapped.
+  void dismissBanner(String id) {
+    if (banner.value?.id == id) banner.value = null;
+  }
+
+  ChatBanner? _greetingBanner(String? notifiedId) => greetingBanner(
+        config: _config,
+        enabled: _bannerPlaces > 0,
+        chatOpen: _isOpen,
+        appActive: _active,
+        language: _deviceLanguage(),
+        allowed: _allowed,
+        greetingPending: _greetingPending,
+        notifiedId: notifiedId,
+      );
+
+  /// Shows the greeting as ONE banner per greeting and install
+  /// (chat_rules.dart greetingBanner). The red 1 stays until the chat opens.
+  Future<void> _showGreetingIfDue() async {
+    final env = _env;
+    if (env == null || _greetingBusy || _greetingBanner(null) == null) return;
+    _greetingBusy = true;
+    try {
+      final prefs = await _prefs();
+      final key = chatGreetingNotifiedKey(env.appId);
+      // Asked again: the chat may have opened while the phone's storage answered.
+      final next = _greetingBanner(prefs?.getString(key));
+      final greetingId = next?.greetingId;
+      if (next == null || greetingId == null || !_greetingsShown.add('${env.appId}:$greetingId')) return;
+      unawaited(prefs?.setString(key, greetingId));
+      banner.value = next;
+    } finally {
+      _greetingBusy = false;
+    }
   }
 
   // ── The socket ─────────────────────────────────────────────────────────
@@ -776,6 +1202,17 @@ class LiveChat extends ChangeNotifier with WidgetsBindingObserver {
     if (frame['event'] == 'message' && message is Map && message['sender'] == 'team') {
       _unread++;
       _publish();
+      // With the app in front and the chat closed, the reply shows as a
+      // banner too (4.17.0), a newer one in place of the last.
+      final next = replyBanner(
+        frame,
+        config: _config,
+        enabled: _bannerPlaces > 0,
+        chatOpen: _isOpen,
+        appActive: _active,
+        language: _deviceLanguage(),
+      );
+      if (next != null) banner.value = next;
     } else if (frame['event'] == 'read' && frame['by'] == 'visitor') {
       _unread = 0;
       _publish();
@@ -1035,6 +1472,11 @@ class _ChatSheetState extends State<_ChatSheet> {
 /// screens its page rules leave out (matched against the name you pass to
 /// `Affiliateo.page`), and while the chat is open.
 ///
+/// Since 4.17.0 it also wiggles every so often (the Wiggle setting in your
+/// dashboard, or [wiggleSeconds]) and draws the SDK's own banner at the top
+/// of the screen for a reply that arrives while the app is open
+/// ([inAppBanner]).
+///
 /// Every setting is optional and wins over the Live Chat settings in your
 /// Affiliateo dashboard; anything left out keeps the dashboard's choice.
 class AffiliateoChat extends StatefulWidget {
@@ -1051,6 +1493,8 @@ class AffiliateoChat extends StatefulWidget {
     this.size,
     this.bottomPadding = 0,
     this.navigatorKey,
+    this.wiggleSeconds,
+    this.inAppBanner = true,
   });
 
   /// Your app (in MaterialApp.builder, the `child` it hands you).
@@ -1083,6 +1527,20 @@ class AffiliateoChat extends StatefulWidget {
   /// Your app's navigator key, when it has one; otherwise the bubble finds
   /// the navigator itself.
   final GlobalKey<NavigatorState>? navigatorKey;
+
+  /// Seconds between two wiggles of the bubble (4.17.0), over the dashboard's
+  /// Wiggle setting and over `Affiliateo.setChatBubbleWiggle`: a whole
+  /// number, 3 or more; 0 for no wiggle. Leave it out and the dashboard (or
+  /// `setChatBubbleWiggle`) decides.
+  final int? wiggleSeconds;
+
+  /// The SDK's own banner (4.17.0) for a reply that arrives while the app is
+  /// open and the chat is closed, and for the greeting once after
+  /// `Affiliateo.chatNotificationsAllowed()`: a card at the top of the
+  /// screen for 5 seconds; a tap opens the chat. It shows over any screen,
+  /// also while [visible] is false. Set it to false when your app shows chat
+  /// notifications itself while it is open.
+  final bool inAppBanner;
 
   @override
   State<AffiliateoChat> createState() => _AffiliateoChatState();
@@ -1126,7 +1584,12 @@ class _AffiliateoChatState extends State<AffiliateoChat> {
         style: widget.bubbleStyle,
         corner: widget.corner,
         size: widget.size,
+        // This widget's own time first, then setChatBubbleWiggle's.
+        wiggleSeconds: widget.wiggleSeconds ?? _chat.codeWiggle,
       );
+
+  NavigatorState? _findNavigator() =>
+      mounted ? widget.navigatorKey?.currentState ?? _navigatorFor(context) : null;
 
   @override
   void initState() {
@@ -1134,6 +1597,8 @@ class _AffiliateoChatState extends State<AffiliateoChat> {
     _chat.widgetLook = _look;
     _chat.want();
     _chat.bubblePlaced();
+    _chat.navigatorPlaced(_findNavigator);
+    if (widget.inAppBanner) _chat.bannerPlaced();
     _shown.add(this);
     if (!_watching) {
       _watching = true;
@@ -1166,13 +1631,24 @@ class _AffiliateoChatState extends State<AffiliateoChat> {
   void didUpdateWidget(AffiliateoChat oldWidget) {
     super.didUpdateWidget(oldWidget);
     _chat.widgetLook = _look;
+    if (widget.inAppBanner != oldWidget.inAppBanner) {
+      // Later, outside this build: the banner on show may go with it.
+      final on = widget.inAppBanner;
+      scheduleMicrotask(() => on ? _chat.bannerPlaced() : _chat.bannerRemoved());
+    }
   }
 
   @override
   void dispose() {
     _shown.remove(this);
     _chat.bubbleRemoved();
+    _chat.navigatorRemoved(_findNavigator);
     _chat.widgetLook = const ChatLook();
+    if (widget.inAppBanner) {
+      // Later, outside the tree's teardown: the banner on show goes with the last place.
+      final chat = _chat;
+      scheduleMicrotask(chat.bannerRemoved);
+    }
     super.dispose();
   }
 
@@ -1199,6 +1675,12 @@ class _AffiliateoChatState extends State<AffiliateoChat> {
     unawaited(_chat.open(navigator));
   }
 
+  /// The phone asks for less motion: Android's "Remove animations" (or an
+  /// animator scale of 0) reads as disableAnimations, the iPhone's Reduce
+  /// Motion as reduceMotion.
+  static bool _reduceMotion(MediaQueryData media) =>
+      media.disableAnimations || WidgetsBinding.instance.platformDispatcher.accessibilityFeatures.reduceMotion;
+
   @override
   Widget build(BuildContext context) {
     return Stack(
@@ -1209,7 +1691,33 @@ class _AffiliateoChatState extends State<AffiliateoChat> {
           animation: _changes,
           builder: (context, _) => _bubble(context),
         ),
+        // The banner shows over any screen, also one the bubble is hidden on.
+        if (widget.inAppBanner)
+          ValueListenableBuilder<ChatBanner?>(
+            valueListenable: _chat.banner,
+            builder: (context, banner, _) => banner == null ? const SizedBox.shrink() : _banner(context, banner),
+          ),
       ],
+    );
+  }
+
+  Widget _banner(BuildContext context, ChatBanner banner) {
+    final media = MediaQuery.of(context);
+    final bubble = applyChatLook(_chat.dashboardBubble, _look);
+    return _ChatBannerCard(
+      // A newer banner takes the place of the one on show.
+      key: ValueKey<String>(banner.id),
+      banner: banner,
+      color: _colorOf(bubble.color),
+      iconColor: _colorOf(bubble.iconColor),
+      dark: media.platformBrightness == Brightness.dark,
+      reduceMotion: _reduceMotion(media),
+      insets: media.padding,
+      onOpen: () {
+        _chat.dismissBanner(banner.id);
+        _open();
+      },
+      onDismiss: _chat.dismissBanner,
     );
   }
 
@@ -1251,6 +1759,16 @@ class _AffiliateoChatState extends State<AffiliateoChat> {
     final pos = clamp(_dragged ?? corner);
     final words = chatWords(_deviceLanguage());
     final label = state.unread > 0 ? words[2].replaceAll('{n}', '${state.unread}') : words[0];
+    // The wiggle (4.17.0): every so many seconds the bubble does one short
+    // wiggle and rests (chat_rules.dart mayWiggle says when). 0 holds still.
+    final wiggles = mayWiggle(
+      seconds: bubble.wiggleSeconds,
+      visible: true,
+      chatOpen: state.isOpen,
+      appActive: _chat.active,
+      dragging: _moving,
+      reduceMotion: _reduceMotion(media),
+    );
 
     return Positioned(
       right: pos.dx,
@@ -1271,6 +1789,7 @@ class _AffiliateoChatState extends State<AffiliateoChat> {
           onPanUpdate: (d) {
             _moved += d.delta;
             if (!_moving && _moved.dx.abs() + _moved.dy.abs() < 6) return;
+            // A bubble being dragged holds still (the rebuild rests its wiggle).
             _moving = true;
             setState(() => _dragged = clamp(Offset(_start.dx - _moved.dx, _start.dy - _moved.dy)));
           },
@@ -1279,25 +1798,345 @@ class _AffiliateoChatState extends State<AffiliateoChat> {
               _open();
               return;
             }
+            // Let go: it may wiggle again, a full wait from now.
+            setState(() => _moving = false);
             final at = _dragged;
             if (appId != null && at != null) {
               unawaited(_prefs().then((p) => p?.setString(_posKey(appId), jsonEncode({'x': at.dx, 'y': at.dy}))));
             }
           },
-          child: CustomPaint(
-            size: Size.square(size),
-            painter: _BubblePainter(
-              color: _colorOf(bubble.color),
-              iconColor: _colorOf(bubble.iconColor),
-              glass: bubble.style == AffiliateoChatBubbleStyle.glass,
-              badge: badgeText(state.unread),
-              online: state.online,
+          onPanCancel: () {
+            if (_moving) setState(() => _moving = false);
+          },
+          // The whole bubble moves as one piece: the red number and the
+          // green dot are part of the drawing.
+          child: _ChatWiggle(
+            seconds: wiggles ? bubble.wiggleSeconds : 0,
+            child: CustomPaint(
+              size: Size.square(size),
+              painter: _BubblePainter(
+                color: _colorOf(bubble.color),
+                iconColor: _colorOf(bubble.iconColor),
+                glass: bubble.style == AffiliateoChatBubbleStyle.glass,
+                badge: badgeText(state.unread),
+                online: state.online,
+              ),
             ),
           ),
         ),
       ),
     );
   }
+}
+
+/// The wiggle (4.17.0, version 2): every [seconds] the bubble turns left and
+/// right around its own center through three swings that die down, growing a
+/// touch on the way, and rests (0.9 s; chat_rules.dart wiggleAngle and
+/// wiggleScale). One value runs 0 to 1 at an even pace and the turn and the
+/// size are worked out from the formulas on every frame, so the motion is a
+/// smooth curve, never a few steps. The first wiggle comes a full wait after
+/// the bubble shows. With [seconds] 0 (hidden, dragged, the chat open, the
+/// app at the back, Reduce Motion) a wiggle under way is cut back to rest at
+/// once.
+class _ChatWiggle extends StatefulWidget {
+  const _ChatWiggle({required this.seconds, required this.child});
+
+  final int seconds;
+  final Widget child;
+
+  @override
+  State<_ChatWiggle> createState() => _ChatWiggleState();
+}
+
+class _ChatWiggleState extends State<_ChatWiggle> with SingleTickerProviderStateMixin {
+  late final AnimationController _turn = AnimationController(vsync: this, duration: wiggleDuration);
+  Timer? _timer;
+
+  @override
+  void initState() {
+    super.initState();
+    _arm();
+  }
+
+  @override
+  void didUpdateWidget(_ChatWiggle oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.seconds != oldWidget.seconds) _arm();
+  }
+
+  void _arm() {
+    _timer?.cancel();
+    _timer = null;
+    // Back to rest: the start of the curve, which is also its end.
+    if (_turn.isAnimating || _turn.value != 0) _turn.value = 0;
+    final seconds = widget.seconds;
+    if (seconds <= 0) return;
+    _timer = Timer.periodic(Duration(seconds: seconds), (_) {
+      if (!mounted) return;
+      // An even pace (no easing): the curve is in the formulas.
+      _turn.forward(from: 0).whenCompleteOrCancel(() {
+        if (mounted && !_turn.isAnimating) _turn.value = 0;
+      });
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    _turn.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _turn,
+      child: widget.child,
+      builder: (context, child) {
+        final p = _turn.value;
+        return Transform.rotate(
+          angle: wiggleAngle(p) * pi / 180,
+          child: Transform.scale(scale: wiggleScale(p), child: child),
+        );
+      },
+    );
+  }
+}
+
+/// The SDK's own banner (4.17.0): a reply, or the greeting, as a card at the
+/// top of the screen inside the safe area, like a notification. The business
+/// logo (the bubble's chat icon when there is none), the Live Chat app's name
+/// in bold and the message under it, two lines at most. It slides down, stays
+/// chatBannerStay and slides away; a swipe up sends it away sooner and a tap
+/// opens the chat. With Reduce Motion it fades instead of sliding. Light and
+/// dark follow the phone. The same card as the React Native SDK's.
+class _ChatBannerCard extends StatefulWidget {
+  const _ChatBannerCard({
+    super.key,
+    required this.banner,
+    required this.color,
+    required this.iconColor,
+    required this.dark,
+    required this.reduceMotion,
+    required this.insets,
+    required this.onOpen,
+    required this.onDismiss,
+  });
+
+  final ChatBanner banner;
+
+  /// The bubble's colors, for the chat icon when there is no logo.
+  final Color color;
+  final Color iconColor;
+  final bool dark;
+  final bool reduceMotion;
+
+  /// The safe area.
+  final EdgeInsets insets;
+  final VoidCallback onOpen;
+
+  /// It left the screen: its time ran out or it was swiped away. Called with
+  /// the banner's id.
+  final void Function(String id) onDismiss;
+
+  @override
+  State<_ChatBannerCard> createState() => _ChatBannerCardState();
+}
+
+class _ChatBannerCardState extends State<_ChatBannerCard> with SingleTickerProviderStateMixin {
+  /// 0: off screen (or see-through), 1: in place.
+  late final AnimationController _place = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 280),
+    reverseDuration: const Duration(milliseconds: 220),
+  );
+  late final Animation<double> _eased =
+      CurvedAnimation(parent: _place, curve: Curves.easeOutCubic, reverseCurve: Curves.easeInCubic);
+  Timer? _stay;
+  bool _leaving = false;
+  double _swiped = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_place.forward());
+    _stay = Timer(chatBannerStay, _leave);
+  }
+
+  /// Slides (or fades) away, then says it is gone.
+  void _leave() {
+    if (_leaving || !mounted) return;
+    _leaving = true;
+    _stay?.cancel();
+    final id = widget.banner.id;
+    final gone = widget.onDismiss;
+    _place.reverse().whenCompleteOrCancel(() {
+      if (mounted) gone(id);
+    });
+  }
+
+  @override
+  void dispose() {
+    _stay?.cancel();
+    _place.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final banner = widget.banner;
+    final dark = widget.dark;
+    final insets = widget.insets;
+    final top = insets.top + 8;
+    final direction = Directionality.maybeOf(context) ?? TextDirection.ltr;
+    final title = TextStyle(
+      inherit: false,
+      fontSize: 15,
+      fontWeight: FontWeight.w600,
+      color: dark ? const Color(0xFFFFFFFF) : const Color(0xFF111111),
+      decoration: TextDecoration.none,
+    );
+    final body = TextStyle(
+      inherit: false,
+      fontSize: 14,
+      height: 19 / 14,
+      fontWeight: FontWeight.w400,
+      color: dark ? const Color(0xCCEBEBF5) : const Color(0xFF3C3C43),
+      decoration: TextDecoration.none,
+    );
+    final glyph = _ChatGlyph(color: widget.color, iconColor: widget.iconColor);
+    final logoUrl = banner.logoUrl;
+
+    final card = Semantics(
+      container: true,
+      button: true,
+      // Read out as a notification would be.
+      liveRegion: true,
+      label: '${banner.title}. ${banner.body}',
+      excludeSemantics: true,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: widget.onOpen,
+        // A swipe up sends it away; anything else is left to the tap.
+        onVerticalDragStart: (_) => _swiped = 0,
+        onVerticalDragUpdate: (d) => _swiped += d.delta.dy,
+        onVerticalDragEnd: (d) {
+          if (_swiped < -12 || (d.primaryVelocity ?? 0) < -300) _leave();
+        },
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            color: dark ? const Color(0xFF2C2C2E) : const Color(0xFFFFFFFF),
+            borderRadius: BorderRadius.circular(20),
+            border: dark ? Border.all(color: const Color(0x24FFFFFF), width: 0.5) : null,
+            boxShadow: const [BoxShadow(color: Color(0x2E000000), blurRadius: 16, offset: Offset(0, 6))],
+          ),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 14),
+            child: Row(
+              children: [
+                // Both pictures are decoration: the card itself is the
+                // button, and it says the title and the message.
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(9),
+                  child: SizedBox.square(
+                    dimension: 38,
+                    child: logoUrl == null
+                        ? glyph
+                        : Image.network(
+                            logoUrl,
+                            width: 38,
+                            height: 38,
+                            fit: BoxFit.cover,
+                            excludeFromSemantics: true,
+                            // While it loads, and when it cannot: the chat icon.
+                            frameBuilder: (context, child, frame, loadedAtOnce) =>
+                                frame == null && !loadedAtOnce ? glyph : child,
+                            errorBuilder: (context, error, stack) => glyph,
+                          ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(banner.title, maxLines: 1, overflow: TextOverflow.ellipsis, style: title),
+                      const SizedBox(height: 1),
+                      Text(banner.body, maxLines: 2, overflow: TextOverflow.ellipsis, style: body),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+
+    return Positioned(
+      top: 0,
+      left: 0,
+      right: 0,
+      child: Padding(
+        padding: EdgeInsets.only(top: top, left: insets.left + 12, right: insets.right + 12),
+        // Only the card takes touches: the app beside it stays usable.
+        child: Align(
+          alignment: Alignment.topCenter,
+          child: ConstrainedBox(
+            // No wider than a notification on a tablet.
+            constraints: const BoxConstraints(maxWidth: 520),
+            child: AnimatedBuilder(
+              animation: _eased,
+              child: Directionality(textDirection: direction, child: card),
+              builder: (context, child) {
+                final t = _eased.value;
+                final faded = Opacity(opacity: t.clamp(0.0, 1.0).toDouble(), child: child);
+                // Reduce Motion: it fades in place instead of sliding down.
+                if (widget.reduceMotion) return faded;
+                return Transform.translate(offset: Offset(0, -(top + 120) * (1 - t)), child: faded);
+              },
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// The bubble's chat icon on its color, for a banner with no logo.
+class _ChatGlyph extends StatelessWidget {
+  const _ChatGlyph({required this.color, required this.iconColor});
+
+  final Color color;
+  final Color iconColor;
+
+  @override
+  Widget build(BuildContext context) {
+    return ColoredBox(
+      color: color,
+      child: CustomPaint(size: const Size.square(38), painter: _GlyphPainter(iconColor)),
+    );
+  }
+}
+
+class _GlyphPainter extends CustomPainter {
+  _GlyphPainter(this.color);
+
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    // The speech bubble at 22 points, in the middle (60% of a circle 22 / 0.6 wide).
+    const circle = 22 / 0.6;
+    canvas.save();
+    canvas.translate((size.width - circle) / 2, (size.height - circle) / 2);
+    canvas.drawPath(_BubblePainter._speechBubble(circle), Paint()..color = color);
+    canvas.restore();
+  }
+
+  @override
+  bool shouldRepaint(_GlyphPainter old) => old.color != color;
 }
 
 /// The bubble as the website and the other SDKs draw it: solid is the color

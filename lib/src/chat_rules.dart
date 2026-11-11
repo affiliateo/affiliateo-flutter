@@ -29,6 +29,7 @@ class ChatBubbleConfig {
     this.color = defaultColor,
     this.iconColor = defaultIconColor,
     this.style = AffiliateoChatBubbleStyle.solid,
+    this.wiggleSeconds = 0,
   });
 
   static const String defaultColor = '#1754d8';
@@ -52,6 +53,9 @@ class ChatBubbleConfig {
   final String iconColor;
   final AffiliateoChatBubbleStyle style;
 
+  /// Seconds between two wiggles of the bubble (4.17.0); 0 is no wiggle.
+  final int wiggleSeconds;
+
   ChatBubbleConfig copyWith({
     AffiliateoChatCorner? corner,
     double? size,
@@ -59,6 +63,7 @@ class ChatBubbleConfig {
     String? color,
     String? iconColor,
     AffiliateoChatBubbleStyle? style,
+    int? wiggleSeconds,
   }) {
     return ChatBubbleConfig(
       corner: corner ?? this.corner,
@@ -70,9 +75,79 @@ class ChatBubbleConfig {
       color: color ?? this.color,
       iconColor: iconColor ?? this.iconColor,
       style: style ?? this.style,
+      wiggleSeconds: wiggleSeconds ?? this.wiggleSeconds,
     );
   }
 }
+
+// ── The wiggle (4.17.0): the website's rules, lib/live-chat/bubble-options.ts ──
+//
+// One wiggle (version 2): the whole bubble, with its red number and green
+// dot, turns around its own center through three left-right swings that die
+// down, growing a touch on the way, and ends exactly at rest. A curve, drawn
+// on every frame from the two formulas below, never a few turns with jumps in
+// between (that looked glitchy).
+
+/// The shortest wait between two wiggles; a smaller number counts as this.
+const int minWiggleSeconds = 3;
+
+/// The longest wait read from a config or from code (a day).
+const int maxWiggleSeconds = 86400;
+
+/// How long one wiggle lasts.
+const Duration wiggleDuration = Duration(milliseconds: 900);
+
+/// The widest the turn could ever be, in degrees (the first swing reaches about 14).
+const double wiggleMaxDegrees = 16;
+
+/// How many full left-right swings one wiggle makes.
+const int wiggleSwings = 3;
+
+/// How much the bubble grows at the middle of the wiggle (0.06 is 6%).
+const double wiggleGrow = 0.06;
+
+/// How fast the swings die down.
+const double wiggleDecay = 1.2;
+
+/// The turn in degrees at progress [p] (0 to 1):
+/// 16 * sin(6 * PI * p) * (1 - p)^1.2, and 0 at both ends and outside them.
+double wiggleAngle(double p) {
+  if (!(p > 0) || p >= 1) return 0;
+  return wiggleMaxDegrees * sin(2 * wiggleSwings * pi * p) * pow(1 - p, wiggleDecay);
+}
+
+/// The size at progress [p] (0 to 1): 1 + 0.06 * sin(PI * p), and 1 at both
+/// ends and outside them.
+double wiggleScale(double p) {
+  if (!(p > 0) || p >= 1) return 1;
+  return 1 + wiggleGrow * sin(pi * p);
+}
+
+/// `bubble.wiggle_seconds` of the config: whole seconds, at least
+/// [minWiggleSeconds]; 0 (no wiggle) for a config without the field (an older
+/// server) or with anything that is not a number above zero.
+int readWiggleSeconds(Object? value) {
+  if (value is! num || !value.isFinite || value <= 0) return 0;
+  return min(maxWiggleSeconds, max(minWiggleSeconds, value.floor()));
+}
+
+/// What the app's own code asks for (`AffiliateoChat(wiggleSeconds: ...)`):
+/// whole seconds, at least [minWiggleSeconds]; 0 or less is off; null is "not
+/// set" (the dashboard decides).
+int? wiggleOverride(int? seconds) => seconds == null ? null : readWiggleSeconds(seconds);
+
+/// Whether the bubble may wiggle right now: it is on screen, the chat is
+/// closed, the app is in front, nobody is dragging it, the phone does not ask
+/// for less motion, and there is a wait to count.
+bool mayWiggle({
+  required int seconds,
+  required bool visible,
+  required bool chatOpen,
+  required bool appActive,
+  required bool dragging,
+  required bool reduceMotion,
+}) =>
+    seconds > 0 && visible && !chatOpen && appActive && !dragging && !reduceMotion;
 
 final RegExp _hex6 = RegExp(r'^#[0-9a-f]{6}$', caseSensitive: false);
 
@@ -113,6 +188,7 @@ ChatBubbleConfig readBubbleConfig(Object? raw) {
     color: color is String && _hex6.hasMatch(color) ? color : ChatBubbleConfig.defaultColor,
     iconColor: iconColor is String && _hex6.hasMatch(iconColor) ? iconColor : ChatBubbleConfig.defaultIconColor,
     style: b['style'] == 'glass' ? AffiliateoChatBubbleStyle.glass : AffiliateoChatBubbleStyle.solid,
+    wiggleSeconds: readWiggleSeconds(b['wiggle_seconds']),
   );
 }
 
@@ -123,6 +199,10 @@ class ChatConfig {
     this.showBubble = false,
     this.online = false,
     this.bubble = const ChatBubbleConfig(),
+    this.name,
+    this.logoUrl,
+    this.greeting,
+    this.greetings = const <String, String>{},
   });
 
   static const ChatConfig off = ChatConfig();
@@ -138,6 +218,33 @@ class ChatConfig {
 
   /// The owner's corner, size, screens and colors for the bubble.
   final ChatBubbleConfig bubble;
+
+  /// Whose chat it is, for the banner (4.17.0): the Live Chat app's name, the
+  /// business's when the app has none.
+  final String? name;
+
+  /// The business logo, an https address or nothing.
+  final String? logoUrl;
+
+  /// The owner's greeting, as the chat window shows it first.
+  final String? greeting;
+
+  /// The greeting in the other languages the owner wrote one in, by
+  /// two-letter language.
+  final Map<String, String> greetings;
+}
+
+/// One short text of the config: trimmed, null when it is not text or empty.
+String? _configText(Object? value) {
+  if (value is! String) return null;
+  final text = value.trim();
+  return text.isEmpty ? null : text;
+}
+
+/// The first two letters of a language tag ("pt-BR", "zh_Hans"), lowercase.
+String _languageCode(String? language) {
+  final tag = (language == null || language.isEmpty ? 'en' : language).toLowerCase();
+  return tag.length > 2 ? tag.substring(0, 2) : tag;
 }
 
 /// The config answer, read the same way wherever it comes from (a GET of
@@ -145,11 +252,28 @@ class ChatConfig {
 /// `enabled: true` is off.
 ChatConfig readChatConfig(Object? json) {
   if (json is! Map || json['enabled'] != true) return ChatConfig.off;
+  final app = json['app'];
+  final business = json['business'];
+  final logo = business is Map ? _configText(business['logo_url']) : null;
+  final versions = json['greetings'];
+  final greetings = <String, String>{};
+  if (versions is Map) {
+    for (final entry in versions.entries) {
+      final key = entry.key;
+      final text = _configText(entry.value);
+      if (key is String && key.isNotEmpty && text != null) greetings[_languageCode(key)] = text;
+    }
+  }
   return ChatConfig(
     enabled: true,
     showBubble: json['show_bubble'] == true,
     online: json['online'] == true,
     bubble: readBubbleConfig(json['bubble']),
+    name: (app is Map ? _configText(app['name']) : null) ?? (business is Map ? _configText(business['name']) : null),
+    // Only an https picture is drawn.
+    logoUrl: logo != null && RegExp(r'^https://', caseSensitive: false).hasMatch(logo) ? logo : null,
+    greeting: _configText(json['greeting']),
+    greetings: greetings,
   );
 }
 
@@ -211,6 +335,7 @@ class ChatLook {
     this.style,
     this.corner,
     this.size,
+    this.wiggleSeconds,
   });
 
   /// Colors as #rrggbb.
@@ -228,6 +353,10 @@ class ChatLook {
   /// One size for phones and tablets alike, in points.
   final double? size;
 
+  /// Seconds between two wiggles (4.17.0): 3 or more; 0 for none; null, the
+  /// dashboard's.
+  final int? wiggleSeconds;
+
   @override
   bool operator ==(Object other) =>
       other is ChatLook &&
@@ -237,10 +366,11 @@ class ChatLook {
       other.placeholder == placeholder &&
       other.style == style &&
       other.corner == corner &&
-      other.size == size;
+      other.size == size &&
+      other.wiggleSeconds == wiggleSeconds;
 
   @override
-  int get hashCode => Object.hash(color, iconColor, sendColor, placeholder, style, corner, size);
+  int get hashCode => Object.hash(color, iconColor, sendColor, placeholder, style, corner, size, wiggleSeconds);
 }
 
 /// A color as code may write it ("#7C3AED", "7c3aed", "#fa0") as #rrggbb,
@@ -264,6 +394,7 @@ ChatBubbleConfig applyChatLook(ChatBubbleConfig bubble, ChatLook look) {
     corner: look.corner,
     size: size,
     sizePhone: size,
+    wiggleSeconds: wiggleOverride(look.wiggleSeconds),
   );
 }
 
@@ -595,3 +726,345 @@ String _jsString(String value) {
   out.write("'");
   return out.toString();
 }
+
+// ── Notifications (4.17.0) ───────────────────────────────────────────────
+// A reply from the team reaches the phone as a push. The app's own push
+// plugin asks for the token and the phone draws the notification; the SDK
+// registers the phone with Affiliateo and says which notifications are the
+// chat's. The website's lib/live-chat/visitor-push.ts sends them.
+
+/// A push token as the server takes it: an iPhone's is Apple's device token
+/// in hex (lowercased here; spaces and the < > of an old description are
+/// dropped), an Android phone's is Firebase's registration token exactly as
+/// given. Null for anything else, a Firebase token on an iPhone included:
+/// Affiliateo sends an iPhone's through Apple.
+String? chatPushToken(Object? token, String platform) {
+  if (token is! String) return null;
+  if (platform == 'ios') {
+    final hex = token.replaceAll(RegExp(r'[\s<>]'), '').toLowerCase();
+    return RegExp(r'^[0-9a-f]{32,512}$').hasMatch(hex) ? hex : null;
+  }
+  final fcm = token.trim();
+  return RegExp(r'^[A-Za-z0-9:_-]{32,2048}$').hasMatch(fcm) ? fcm : null;
+}
+
+/// The body of POST /api/live-chat/push-devices, or null when it would be
+/// refused anyway: no usable token, no device id (the reply is matched to
+/// the phone by it), or an iPhone with no bundle id (Apple needs it to
+/// deliver).
+///
+/// display "system": this SDK cannot draw a system notification, so the
+/// phone draws it itself while the app is closed or in the background
+/// (Android's push then carries a notification block; the iPhone's is an
+/// alert anyway). With the app open, the SDK's own banner shows it.
+Map<String, String>? chatPushBody({
+  required String appId,
+  required String platform,
+  required String token,
+  required String? deviceId,
+  String? bundleId,
+  String? environment,
+  String? visitorId,
+  String? userId,
+  String? language,
+}) {
+  if (platform != 'ios' && platform != 'android') return null;
+  final pushToken = chatPushToken(token, platform);
+  final device = (deviceId ?? '').trim();
+  final bundle = (bundleId ?? '').trim();
+  if (appId.isEmpty || pushToken == null || device.isEmpty) return null;
+  if (platform == 'ios' && bundle.isEmpty) return null;
+  return <String, String>{
+    'app': appId,
+    'platform': platform,
+    'token': pushToken,
+    'device_id': device,
+    'language': language == null || language.isEmpty ? 'en' : language,
+    'display': 'system',
+    if (bundle.isNotEmpty) 'bundle_id': bundle,
+    if (platform == 'ios') 'environment': environment == 'sandbox' ? 'sandbox' : 'production',
+    if (visitorId != null && visitorId.isNotEmpty) 'visitor_id': visitorId,
+    if (userId != null && userId.isNotEmpty) 'user_id': userId,
+  };
+}
+
+/// What became of a request to /api/live-chat/push-devices.
+enum ChatPushAnswer {
+  /// `200 { "ok": true }`: stored (or forgotten).
+  ok,
+
+  /// `200 { "ok": false }`: an app the server does not know, one whose chat
+  /// is off, or something it cannot use. Nothing is stored.
+  notTaken,
+
+  /// Any other answer (429, 5xx, a server from before the route): left until
+  /// the next launch.
+  failed,
+
+  /// No answer at all (offline, a time out): tried again later.
+  noAnswer,
+}
+
+/// Reads the server's answer: [status] null is no answer at all.
+ChatPushAnswer chatPushAnswer(int? status, String? body) {
+  if (status == null) return ChatPushAnswer.noAnswer;
+  if (status != 200) return ChatPushAnswer.failed;
+  Object? json;
+  try {
+    json = jsonDecode(body ?? '');
+  } catch (_) {
+    json = null;
+  }
+  return json is Map && json['ok'] == true ? ChatPushAnswer.ok : ChatPushAnswer.notTaken;
+}
+
+/// A request that got no answer (the phone was offline) is not sent again
+/// sooner than this.
+const Duration chatPushRetryAfter = Duration(minutes: 5);
+
+/// The token the server last confirmed for this phone, kept so a sign-out or
+/// an opt-out knows which one the server is to forget.
+String chatPushKey(String appId) => 'affiliateo_chat_push_$appId';
+
+/// A token the server has yet to forget (a sign-out or opt-out made offline).
+String chatPushForgetKey(String appId) => 'affiliateo_chat_push_forget_$appId';
+
+/// Set by a sign-out: the phone is not registered again until the next
+/// person has a thread of their own.
+String chatPushHeldKey(String appId) => 'affiliateo_chat_push_held_$appId';
+
+/// The chat's part of a notification: the conversation and the message it is
+/// about (and, on Android, the title and text the phone drew).
+class ChatNotificationData {
+  const ChatNotificationData({this.app, this.conversationId, this.messageId, this.title, this.body});
+
+  final String? app;
+  final String? conversationId;
+  final String? messageId;
+  final String? title;
+  final String? body;
+
+  @override
+  bool operator ==(Object other) =>
+      other is ChatNotificationData &&
+      other.app == app &&
+      other.conversationId == conversationId &&
+      other.messageId == messageId &&
+      other.title == title &&
+      other.body == body;
+
+  @override
+  int get hashCode => Object.hash(app, conversationId, messageId, title, body);
+
+  @override
+  String toString() =>
+      'ChatNotificationData(app: $app, conversationId: $conversationId, messageId: $messageId, title: $title, body: $body)';
+}
+
+/// The chat's part of a notification, or null when the notification is not a
+/// chat reply. [data] is what the app's push plugin hands over as the
+/// notification's data: Apple's payload carries an `affiliateo_chat` object,
+/// Firebase's data an `affiliateo_chat: "1"`. The whole message works too
+/// (its `data` is read).
+ChatNotificationData? chatNotificationData(Object? data) {
+  String? text(Object? value) => value is String && value.isNotEmpty ? value : null;
+  ChatNotificationData? read(Object? node) {
+    if (node is! Map) return null;
+    Object? mark = node['affiliateo_chat'];
+    // Some plugins hand a nested object over as its JSON text.
+    if (mark is String && mark.trim().startsWith('{')) {
+      try {
+        mark = jsonDecode(mark);
+      } catch (_) {
+        // A plain mark.
+      }
+    }
+    if (mark == null || mark == false || mark == '' || mark == '0') return null;
+    final from = mark is Map ? mark : node;
+    return ChatNotificationData(
+      app: text(from['app']),
+      conversationId: text(from['conversation_id']),
+      messageId: text(from['message_id']),
+      title: text(node['title']),
+      body: text(node['body']),
+    );
+  }
+
+  return read(data) ?? read(data is Map ? data['data'] : null);
+}
+
+/// Whether a notification is a Live Chat reply from Affiliateo.
+bool isChatNotification(Object? data) => chatNotificationData(data) != null;
+
+// ── The in-app banner (4.17.0) ───────────────────────────────────────────
+// With the app open, a reply (and the greeting, once) shows as a banner the
+// SDK draws itself at the top of the screen: a card with the business logo,
+// the Live Chat app's name and the message. Flutter has no way of its own to
+// post a system notification, and this needs no plugin.
+
+/// How long the banner stays before it slides away.
+const Duration chatBannerStay = Duration(seconds: 5);
+
+/// The most characters of a message the banner (and a notification) carries.
+const int chatBannerBodyMax = 180;
+
+/// The body for a message with no text, in the 16 languages Affiliateo
+/// speaks: the website's words for the same push.
+const Map<String, String> _sentYouAMessage = {
+  'en': 'Sent you a message',
+  'es': 'Te envió un mensaje',
+  'fr': 'Vous a envoyé un message',
+  'pt': 'Enviou uma mensagem para você',
+  'de': 'Hat dir eine Nachricht gesendet',
+  'ja': 'メッセージが届きました',
+  'it': 'Ti ha inviato un messaggio',
+  'nl': 'Heeft je een bericht gestuurd',
+  'ko': '메시지를 보냈습니다',
+  'zh': '给你发了一条消息',
+  'ru': 'Вам пришло сообщение',
+  'ar': 'أرسل لك رسالة',
+  'hi': 'आपको एक संदेश भेजा',
+  'pl': 'Masz nową wiadomość',
+  'tr': 'Size bir mesaj gönderdi',
+  'vi': 'Đã gửi cho bạn một tin nhắn',
+};
+
+/// The words of a banner: the message on one line (runs of spaces and line
+/// breaks become one space), cut to [chatBannerBodyMax] characters with an
+/// ellipsis when longer, never through the middle of an emoji. A message
+/// with no text says "Sent you a message" in the phone's language. The same
+/// rule as the website's push (lib/live-chat/visitor-push.ts).
+String chatBannerText(Object? text, String? language) {
+  final line = (text is String ? text : '').replaceAll(RegExp(r'\s+'), ' ').trim();
+  if (line.isEmpty) return _sentYouAMessage[_languageCode(language)] ?? _sentYouAMessage['en']!;
+  final characters = line.runes.toList();
+  if (characters.length <= chatBannerBodyMax) return line;
+  return '${String.fromCharCodes(characters.take(chatBannerBodyMax - 1)).trimRight()}…';
+}
+
+/// The greeting as the chat window would show it to this phone: the version
+/// in the phone's language when the owner wrote one, else the main greeting,
+/// else nothing.
+String? chatGreetingText(ChatConfig? config, String? language) {
+  if (config == null) return null;
+  return config.greetings[_languageCode(language)] ?? config.greeting;
+}
+
+/// What a banner is about.
+enum ChatBannerKind { reply, greeting }
+
+/// One banner: what it is about and what it says.
+class ChatBanner {
+  const ChatBanner({
+    required this.id,
+    required this.kind,
+    required this.title,
+    required this.body,
+    this.logoUrl,
+    this.greetingId,
+  });
+
+  /// The message's id, or the greeting's: a newer banner with another id
+  /// replaces the one on screen.
+  final String id;
+  final ChatBannerKind kind;
+
+  /// The Live Chat app's name; "Chat" in the phone's language when the config
+  /// names none.
+  final String title;
+  final String body;
+
+  /// The business logo; null draws the bubble's chat icon.
+  final String? logoUrl;
+
+  /// Set on the greeting's banner: which greeting it was, to remember it.
+  final String? greetingId;
+
+  @override
+  bool operator ==(Object other) =>
+      other is ChatBanner &&
+      other.id == id &&
+      other.kind == kind &&
+      other.title == title &&
+      other.body == body &&
+      other.logoUrl == logoUrl &&
+      other.greetingId == greetingId;
+
+  @override
+  int get hashCode => Object.hash(id, kind, title, body, logoUrl, greetingId);
+
+  @override
+  String toString() => 'ChatBanner($id, $kind, $title, $body, logo: $logoUrl, greeting: $greetingId)';
+}
+
+/// What every banner needs to hold before it may show: a place to draw it
+/// ([enabled]: an AffiliateoChat is placed with `inAppBanner` on), the chat
+/// closed (its own window shows the message), the app in front, the chat on.
+bool _bannerMayShow({
+  required ChatConfig? config,
+  required bool enabled,
+  required bool chatOpen,
+  required bool appActive,
+}) =>
+    enabled && !chatOpen && appActive && config != null && config.enabled;
+
+/// The banner for a frame from the thread's socket (the decoded JSON): a
+/// message the team wrote, while the app is in front and the chat is closed.
+/// Null for anything else (the person's own message, a read receipt, "Chat
+/// closed" lines, a frame that is not the chat's).
+ChatBanner? replyBanner(
+  Object? frame, {
+  required ChatConfig? config,
+  required bool enabled,
+  required bool chatOpen,
+  required bool appActive,
+  required String language,
+}) {
+  if (!_bannerMayShow(config: config, enabled: enabled, chatOpen: chatOpen, appActive: appActive)) return null;
+  if (frame is! Map || frame['kind'] != 'live_chat' || frame['event'] != 'message') return null;
+  final message = frame['message'];
+  if (message is! Map || message['sender'] != 'team') return null;
+  final id = message['id'];
+  return ChatBanner(
+    id: id is String && id.isNotEmpty ? id : 'reply',
+    kind: ChatBannerKind.reply,
+    title: config!.name ?? chatWords(language)[0],
+    body: chatBannerText(message['body'], language),
+    logoUrl: config.logoUrl,
+  );
+}
+
+/// The greeting as a banner, ONCE: after the app said notifications are
+/// allowed (chatNotificationsAllowed), while the greeting is still pending
+/// (the rule behind the red 1: the config has a greeting id, nobody on this
+/// phone opened the chat since, and there is no thread yet) and this greeting
+/// was not shown this way before ([notifiedId] is what the phone remembers).
+/// Its `greetingId` says which greeting it was, so the caller can remember it.
+ChatBanner? greetingBanner({
+  required ChatConfig? config,
+  required bool enabled,
+  required bool chatOpen,
+  required bool appActive,
+  required String language,
+  required bool allowed,
+  required bool greetingPending,
+  required String? notifiedId,
+}) {
+  if (!allowed || !greetingPending) return null;
+  if (!_bannerMayShow(config: config, enabled: enabled, chatOpen: chatOpen, appActive: appActive)) return null;
+  final greetingId = config!.bubble.greetingId;
+  if (greetingId == null || greetingId == notifiedId) return null;
+  final text = chatGreetingText(config, language);
+  if (text == null) return null;
+  return ChatBanner(
+    id: 'greeting-$greetingId',
+    kind: ChatBannerKind.greeting,
+    title: config.name ?? chatWords(language)[0],
+    body: chatBannerText(text, language),
+    logoUrl: config.logoUrl,
+    greetingId: greetingId,
+  );
+}
+
+/// The greeting a phone already showed as a banner (its id), so it shows once.
+String chatGreetingNotifiedKey(String appId) => 'affiliateo_chat_greeting_notified_$appId';
