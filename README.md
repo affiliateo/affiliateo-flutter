@@ -566,14 +566,17 @@ Future<void> setUpChatNotifications() async {
 - On iPhone pass the APNs token (`getAPNSToken()`), which is hex. A Firebase
   token does not work there: Affiliateo sends an iPhone's replies through
   Apple.
-- On iPhone, `firebase_messaging` calls `onMessageOpenedApp` only for
-  notifications that were sent through Firebase, and Affiliateo's go straight
-  to Apple. So with that package a tap on iPhone while your app is in the
-  background brings the app to the front, and the bubble shows the red
-  number, but the chat does not open by itself unless your app passes the
-  tapped notification's data on (from its `AppDelegate`, or with a push
-  package that hands over every tapped notification). On Android the tap
-  opens the chat as shown above.
+- The same code works on iPhone and Android. Affiliateo sends an iPhone's
+  reply straight to Apple, with the id `firebase_messaging` looks for
+  (`gcm.message_id`), so `onMessageOpenedApp` and `getInitialMessage()` hand
+  you the tap there too. On iPhone `message.data['affiliateo_chat']` is a map
+  (the conversation and message ids); on Android it is the text `"1"` beside
+  `title` and `body`. `handleChatNotification` and `isChatNotification` read
+  both, so pass `message.data` as it is.
+- If you listen to `FirebaseMessaging.onMessage` (pushes that arrive while the
+  app is open), skip chat replies there:
+  `if (Affiliateo.isChatNotification(message.data)) return;`. The banner
+  already shows them.
 - The SDK reads your bundle id (iPhone) or package name (Android) itself.
   When the token belongs to another one, pass it:
   `Affiliateo.registerChatPushToken(token, 'ios', bundleId: 'com.you.app')`.

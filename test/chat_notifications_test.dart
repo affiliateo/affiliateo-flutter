@@ -181,6 +181,21 @@ void main() {
       expect(isChatNotification(untyped), isTrue);
     });
 
+    test('reads what firebase_messaging hands Dart for the iPhone\'s push: a nested map with no types', () {
+      // The plugin copies every key of Apple's payload into message.data,
+      // except aps and the gcm. / google. ones (gcm.message_id becomes the
+      // message's id), and Dart keeps the nested object as a plain map.
+      final nested = Map<Object?, Object?>.from(apnsPayload()['affiliateo_chat']! as Map);
+      final data = Map<String, dynamic>.from(<Object?, Object?>{'affiliateo_chat': nested});
+      expect(isChatNotification(data), isTrue);
+      expect(
+        chatNotificationData(data),
+        const ChatNotificationData(app: app, conversationId: 'c-1', messageId: 'm-1'),
+      );
+      // A nested map with nothing in it is still the chat's mark.
+      expect(isChatNotification({'affiliateo_chat': <Object?, Object?>{}}), isTrue);
+    });
+
     test('reads Android\'s data, with the words the phone drew', () {
       final data = fcmData();
       expect(isChatNotification(data), isTrue);
