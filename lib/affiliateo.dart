@@ -2,6 +2,7 @@
 library affiliateo;
 
 export 'src/affiliateo.dart';
+export 'src/affiliate_code.dart';
 export 'src/chat.dart' show AffiliateoChat, AffiliateoChatState;
 export 'src/chat_rules.dart' show AffiliateoChatBubbleStyle, AffiliateoChatCorner;
 export 'src/models.dart';

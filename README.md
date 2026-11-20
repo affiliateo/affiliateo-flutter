@@ -11,7 +11,7 @@ dependencies:
   affiliateo:
     git:
       url: https://github.com/affiliateo/affiliateo-flutter
-      ref: 4.17.0
+      ref: 4.18.0
 ```
 
 Then run `flutter pub get`.
@@ -211,6 +211,33 @@ await InAppPurchase.instance.buyNonConsumable(purchaseParam: param);
 ```
 
 It is null only until the SDK's first identify succeeds. Signing out keeps it.
+
+## Affiliate codes (4.18.0)
+
+A coupon code without the coupon. The buyer types an affiliate's code in a box your app shows, and that affiliate gets the sale. There is no discount, the store is not involved, and nothing is matched by IP address for that buyer.
+
+The code is the one each affiliate already has: the end of their link. Turn on **Affiliate codes** for the app in Affiliateo once your app has the box.
+
+```dart
+final result = await Affiliateo.setAffiliateCode(codeController.text);
+
+if (result.matched) {
+  // Say "Code applied". result.refCode is the affiliate's code.
+} else {
+  // Say "Code not found". result.reason says why:
+  // notFound, invalid, off, notReady or failed.
+}
+
+// Then buy as you already do, with Affiliateo.state.appAccountToken
+// (iOS) or Affiliateo.state.obfuscatedAccountId (Android).
+```
+
+- A typed code beats a link match and is never overwritten by one.
+- A later code replaces an earlier one, so a typo can be fixed before buying.
+- It never throws, and it waits up to 10 seconds for `configure()`.
+- Apps on RevenueCat: set the `affiliateo_ref` attribute again after a match, from `Affiliateo.state.refCode` (see RevenueCat Integration below).
+
+To credit by code only, turn off **Match installs to link clicks** for the app in Affiliateo. Then no install is matched to a link click by IP address.
 
 ## What it does
 

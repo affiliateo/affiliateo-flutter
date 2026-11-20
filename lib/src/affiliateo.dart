@@ -13,6 +13,7 @@ import 'package:device_info_plus/device_info_plus.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'affiliate_code.dart';
 import 'chat.dart';
 import 'chat_rules.dart';
 import 'chat_rules.dart' as chat_rules show isChatNotification;
@@ -531,6 +532,63 @@ class Affiliateo with WidgetsBindingObserver {
       return answer;
     } catch (_) {
       return FreeAccess.inactive;
+    }
+  }
+
+  /// Put an affiliate's code on this device (4.18.0): a coupon code without
+  /// the coupon. The buyer types the code in a box your app shows, you pass
+  /// it here, and that affiliate gets the sale. No discount, the store is not
+  /// involved, and nothing is matched by IP address for this buyer.
+  ///
+  /// The code is the one each affiliate already has, the end of their link. A
+  /// typed code beats a link match and is never overwritten by one; a later
+  /// code replaces an earlier one, so a typo can be fixed before buying. Turn
+  /// on "Affiliate codes" for the app in Affiliateo first.
+  ///
+  /// ```dart
+  /// final result = await Affiliateo.setAffiliateCode(codeController.text);
+  /// setState(() => codeLabel = result.matched ? 'Code applied' : 'Code not found');
+  /// ```
+  ///
+  /// Never throws. Waits (up to 10 seconds) for [configure], since the code
+  /// goes on the device its identify registered. Then buy as you already do,
+  /// with `state.appAccountToken` / `state.obfuscatedAccountId`. Apps on
+  /// RevenueCat set the `affiliateo_ref` attribute again from
+  /// `Affiliateo.state.refCode`, which this updates (see "RevenueCat
+  /// Integration" in the README).
+  static Future<AffiliateCode> setAffiliateCode(String code) async {
+    final self = _instance;
+    try {
+      final typed = AffiliateCodeRules.normalize(code);
+      if (typed == null) {
+        self._log('setAffiliateCode: not a code');
+        return const AffiliateCode.refused(AffiliateCodeReason.invalid);
+      }
+      await self._waitForSignIn(const Duration(seconds: 10));
+      final deviceId = self._deviceId;
+      final campaignId = self._campaignId;
+      // Nothing is sent for a person who opted out, and without a visitor
+      // there is no device on the server to put the code on.
+      if (self._optedOut || deviceId == null || campaignId == null || _state.visitorId == null) {
+        self._log('setAffiliateCode: not ready (no identify yet, or opted out)');
+        return const AffiliateCode.refused(AffiliateCodeReason.notReady);
+      }
+      final response = await self._postJson(
+        '/api/v1/mobile/affiliate-code',
+        {'campaign_id': campaignId, 'device_id': deviceId, 'code': typed},
+        // The buyer is waiting beside a text field.
+        timeout: const Duration(seconds: 10),
+      );
+      final answer = response == null
+          ? const AffiliateCode.refused(AffiliateCodeReason.failed)
+          : AffiliateCodeRules.parseReply(response.statusCode, response.body);
+      if (answer.matched && answer.refCode != null) {
+        _state = _state.copyWith(refCode: answer.refCode, isMatched: true, isLoading: false);
+      }
+      self._log('setAffiliateCode', {'matched': answer.matched, 'ref': answer.refCode, 'reason': answer.reason?.name});
+      return answer;
+    } catch (_) {
+      return const AffiliateCode.refused(AffiliateCodeReason.failed);
     }
   }
 
