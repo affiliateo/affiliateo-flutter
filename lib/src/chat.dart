@@ -7,7 +7,10 @@ import 'dart:math';
 import 'dart:ui' show Brightness, PlatformDispatcher;
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart' show LongPressGestureRecognizer;
 import 'package:flutter/scheduler.dart';
+import 'package:flutter/semantics.dart' show CustomSemanticsAction;
+import 'package:flutter/services.dart' show HapticFeedback;
 import 'package:flutter/widgets.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
@@ -62,6 +65,15 @@ import 'chat_token_store.dart';
 // inAppBanner), and once the app says notifications are allowed
 // (Affiliateo.chatNotificationsAllowed) a greeting nobody has seen shows as
 // one too, once.
+//
+// 4.19.0: hold to hide. A finger kept still on the bubble for a second
+// starts hide mode (a haptic tick; the bubble rocks and a red X shows on its
+// top-left); a tap on the X hides the bubble and the phone remembers it
+// (affiliateo_chat_hidden_<appId>, next to the bubble's dragged place) until
+// Affiliateo.restoreChatBubble(). A touch anywhere else, five seconds, or the
+// bubble going away ends hide mode without hiding. Screen readers get a
+// "Hide chat bubble" action on the bubble that hides it at once. The rules
+// and words are in chat_rules.dart.
 
 /// The chat's state, for a button of your own (`Affiliateo.chatState`).
 @immutable
@@ -402,6 +414,22 @@ class LiveChat extends ChangeNotifier with WidgetsBindingObserver {
   /// not tried again until a config read says the chat is on.
   bool _appRefused = false;
 
+  // Hold to hide (4.19.0): the person hid the bubble on this phone.
+  bool _hiddenByUser = false;
+
+  /// The phone's note was read for the configured app (or written since).
+  bool _hiddenRead = false;
+  Future<void>? _hiddenLoad;
+
+  /// Goes up on every hide and restore: a read that started before one is dropped.
+  int _hiddenWrites = 0;
+
+  /// restoreChatBubble() before configure() said which app: done once it has.
+  bool _restorePending = false;
+
+  /// The app's onChatBubbleHidden.
+  VoidCallback? onHidden;
+
   /// configure() ran: where to ask and what the SDK knows.
   void attach(ChatEnv env) {
     if (_env != null) return;
@@ -415,6 +443,91 @@ class LiveChat extends ChangeNotifier with WidgetsBindingObserver {
     // What the app asked for before configure() had finished (4.17.0).
     syncPush();
     _tryPendingOpen();
+    _readHidden(env.appId);
+  }
+
+  // ── Hold to hide (4.19.0) ──────────────────────────────────────────────
+
+  /// Reads whether the person hid the bubble on this phone, or forgets it
+  /// for a restoreChatBubble() made before configure().
+  void _readHidden(String appId) {
+    if (_restorePending) {
+      _restorePending = false;
+      _hiddenRead = true;
+      unawaited(_writeHidden(appId, false));
+      return;
+    }
+    _hiddenLoad = _loadHidden(appId);
+  }
+
+  Future<void> _loadHidden(String appId) async {
+    final writes = _hiddenWrites;
+    var saved = false;
+    try {
+      saved = (await _prefs())?.getBool(chatHiddenKey(appId)) == true;
+    } catch (_) {
+      // Unreadable storage: the bubble shows.
+    }
+    // A hide or restore since then wins.
+    if (writes != _hiddenWrites) return;
+    _hiddenByUser = saved;
+    _hiddenRead = true;
+    _afterBuild(notifyListeners);
+  }
+
+  Future<void> _writeHidden(String appId, bool hidden) async {
+    try {
+      final prefs = await _prefs();
+      if (hidden) {
+        await prefs?.setBool(chatHiddenKey(appId), true);
+      } else {
+        await prefs?.remove(chatHiddenKey(appId));
+      }
+    } catch (_) {
+      // Unwritable storage: it holds for this launch.
+    }
+  }
+
+  /// Whether the bubble stays away because the person hid it.
+  bool get bubbleHidden =>
+      bubbleHiddenByUser(remembered: _hiddenByUser, read: _hiddenRead, configured: _env != null);
+
+  /// Whether the person hid the bubble on this phone (false before
+  /// configure() said which app).
+  Future<bool> hiddenByUser() async {
+    if (_env == null) return false;
+    await _hiddenLoad;
+    return _hiddenByUser;
+  }
+
+  /// The person tapped the X (or used the screen reader's action): the phone
+  /// remembers it, the bubble goes, and the app's onChatBubbleHidden runs once.
+  void hideByUser() {
+    _hiddenWrites++;
+    _hiddenByUser = true;
+    _hiddenRead = true;
+    final env = _env;
+    if (env != null) unawaited(_writeHidden(env.appId, true));
+    env?.log('chat: the person hid the chat bubble; restoreChatBubble() brings it back');
+    notifyListeners();
+    // Last, so the SDK is in order whatever the app's code does.
+    onHidden?.call();
+  }
+
+  /// Forgets that the person hid the bubble, and the bubble shows again
+  /// wherever AffiliateoChat is placed and visible.
+  void restoreBubble() {
+    _hiddenWrites++;
+    _hiddenByUser = false;
+    final env = _env;
+    if (env == null) {
+      _restorePending = true;
+    } else {
+      _hiddenRead = true;
+      unawaited(_writeHidden(env.appId, false));
+    }
+    want();
+    _afterBuild(notifyListeners);
   }
 
   /// The app is in front (the wiggle and the banner wait for it).
@@ -565,6 +678,12 @@ class LiveChat extends ChangeNotifier with WidgetsBindingObserver {
     _env = null;
     _forgetPending = false;
     _appRefused = false;
+    _hiddenByUser = false;
+    _hiddenRead = false;
+    _hiddenLoad = null;
+    _hiddenWrites++;
+    _restorePending = false;
+    onHidden = null;
     _publish();
   }
 
@@ -577,6 +696,7 @@ class LiveChat extends ChangeNotifier with WidgetsBindingObserver {
     _appRefused = true;
     _tryPendingOpen();
     unawaited(_showGreetingIfDue());
+    _readHidden(env.appId);
   }
 
   void _publish() => _afterBuild(_publishNow);
@@ -1472,6 +1592,10 @@ class _ChatSheetState extends State<_ChatSheet> {
 /// screens its page rules leave out (matched against the name you pass to
 /// `Affiliateo.page`), and while the chat is open.
 ///
+/// Since 4.19.0 the person can hide it: they hold it still for a second, it
+/// rocks and shows a red X, and a tap on the X hides it on this phone until
+/// `Affiliateo.restoreChatBubble()`. See `Affiliateo.onChatBubbleHidden`.
+///
 /// Since 4.17.0 it also wiggles every so often (the Wiggle setting in your
 /// dashboard, or [wiggleSeconds]) and draws the SDK's own banner at the top
 /// of the screen for a reply that arrives while the app is open
@@ -1576,6 +1700,18 @@ class _AffiliateoChatState extends State<AffiliateoChat> {
   bool _moving = false;
   bool _loadedPos = false;
 
+  // Hold to hide (4.19.0).
+  /// Hide mode: the bubble rocks and the X shows.
+  bool _hideMode = false;
+  Timer? _hideTimer;
+
+  /// The rest of this touch on the bubble does nothing: the hold that started
+  /// hide mode, or a touch that ended it.
+  bool _spentTouch = false;
+
+  /// The debug log has said that the person hid the bubble.
+  bool _toldHidden = false;
+
   ChatLook get _look => ChatLook(
         color: _hexOf(widget.color),
         iconColor: _hexOf(widget.iconColor),
@@ -1640,6 +1776,7 @@ class _AffiliateoChatState extends State<AffiliateoChat> {
 
   @override
   void dispose() {
+    _hideTimer?.cancel();
     _shown.remove(this);
     _chat.bubbleRemoved();
     _chat.navigatorRemoved(_findNavigator);
@@ -1675,6 +1812,51 @@ class _AffiliateoChatState extends State<AffiliateoChat> {
     unawaited(_chat.open(navigator));
   }
 
+  /// The hold is done and the finger is still down: hide mode starts, and
+  /// the rest of this touch neither opens nor drags.
+  void _holdDone() {
+    if (_spentTouch || _hideMode || !mounted) return;
+    _spentTouch = true;
+    unawaited(HapticFeedback.mediumImpact());
+    setState(() {
+      _hideMode = true;
+      _moving = false;
+    });
+    _hideTimer?.cancel();
+    _hideTimer = Timer(hideModeDuration, () {
+      if (mounted && _hideMode) setState(_endHideMode);
+    });
+  }
+
+  /// Back to the plain bubble: level, no X, the green dot back.
+  void _endHideMode() {
+    _hideMode = false;
+    _hideTimer?.cancel();
+    _hideTimer = null;
+  }
+
+  /// A finger came down on the bubble. In hide mode it ends hide mode and
+  /// does nothing else (no chat, no drag).
+  void _bubbleDown(PointerDownEvent _) {
+    _spentTouch = _hideMode;
+    if (_hideMode) setState(_endHideMode);
+  }
+
+  /// A finger came down anywhere on the app: hide mode ends, and the app
+  /// gets the touch as always.
+  void _appDown(PointerDownEvent _) {
+    if (_hideMode) setState(_endHideMode);
+  }
+
+  /// The X, or the screen reader's action: the bubble goes, and the phone
+  /// remembers it.
+  void _hideNow() {
+    if (_hideMode) setState(_endHideMode);
+    _toldHidden = true;
+    unawaited(HapticFeedback.lightImpact());
+    _chat.hideByUser();
+  }
+
   /// The phone asks for less motion: Android's "Remove animations" (or an
   /// animator scale of 0) reads as disableAnimations, the iPhone's Reduce
   /// Motion as reduceMotion.
@@ -1686,7 +1868,9 @@ class _AffiliateoChatState extends State<AffiliateoChat> {
     return Stack(
       textDirection: TextDirection.ltr,
       children: [
-        widget.child,
+        // A touch anywhere on the app ends hide mode (4.19.0). Translucent and
+        // in no gesture contest: the app gets every touch as before.
+        Listener(behavior: HitTestBehavior.translucent, onPointerDown: _appDown, child: widget.child),
         AnimatedBuilder(
           animation: _changes,
           builder: (context, _) => _bubble(context),
@@ -1729,8 +1913,21 @@ class _AffiliateoChatState extends State<AffiliateoChat> {
         !state.showBubble ||
         state.isOpen ||
         !bubbleShowsOn(bubble.pageMode, bubble.pageRules, _chat.screen.value)) {
+      // Hide mode ends whenever the bubble goes (4.19.0).
+      _endHideMode();
       return const SizedBox.shrink();
     }
+    if (_chat.bubbleHidden) {
+      _endHideMode();
+      if (!_toldHidden) {
+        _toldHidden = true;
+        _chat._env?.log('chat: the person hid the chat bubble; restoreChatBubble() brings it back');
+      }
+      return const SizedBox.shrink();
+    }
+    _toldHidden = false;
+    // And when the app goes to the back.
+    if (!_chat.active) _endHideMode();
     final appId = _chat._env?.appId;
     if (!_loadedPos && appId != null) unawaited(_loadPos(appId));
 
@@ -1759,6 +1956,8 @@ class _AffiliateoChatState extends State<AffiliateoChat> {
     final pos = clamp(_dragged ?? corner);
     final words = chatWords(_deviceLanguage());
     final label = state.unread > 0 ? words[2].replaceAll('{n}', '${state.unread}') : words[0];
+    final hideWords = hideBubbleWords(_deviceLanguage());
+    final reduceMotion = _reduceMotion(media);
     // The wiggle (4.17.0): every so many seconds the bubble does one short
     // wiggle and rests (chat_rules.dart mayWiggle says when). 0 holds still.
     final wiggles = mayWiggle(
@@ -1767,66 +1966,239 @@ class _AffiliateoChatState extends State<AffiliateoChat> {
       chatOpen: state.isOpen,
       appActive: _chat.active,
       dragging: _moving,
-      reduceMotion: _reduceMotion(media),
+      reduceMotion: reduceMotion,
+      hideMode: _hideMode,
     );
+    // The X's touch target reaches this far past the circle's top and left
+    // edges (4.19.0), so the box under the bubble has that much more room
+    // there. Nothing in that room takes a touch but the X.
+    const reach = (hideXTarget - hideXSize) / 2 - hideXOffset;
 
     return Positioned(
       right: pos.dx,
       bottom: pos.dy,
-      child: Semantics(
-        container: true,
-        button: true,
-        label: label,
-        excludeSemantics: true,
-        child: GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onTap: _open,
-          onPanStart: (_) {
-            _start = pos;
-            _moved = Offset.zero;
-            _moving = false;
-          },
-          onPanUpdate: (d) {
-            _moved += d.delta;
-            if (!_moving && _moved.dx.abs() + _moved.dy.abs() < 6) return;
-            // A bubble being dragged holds still (the rebuild rests its wiggle).
-            _moving = true;
-            setState(() => _dragged = clamp(Offset(_start.dx - _moved.dx, _start.dy - _moved.dy)));
-          },
-          onPanEnd: (_) {
-            if (!_moving) {
-              _open();
-              return;
-            }
-            // Let go: it may wiggle again, a full wait from now.
-            setState(() => _moving = false);
-            final at = _dragged;
-            if (appId != null && at != null) {
-              unawaited(_prefs().then((p) => p?.setString(_posKey(appId), jsonEncode({'x': at.dx, 'y': at.dy}))));
-            }
-          },
-          onPanCancel: () {
-            if (_moving) setState(() => _moving = false);
-          },
-          // The whole bubble moves as one piece: the red number and the
-          // green dot are part of the drawing.
-          child: _ChatWiggle(
-            seconds: wiggles ? bubble.wiggleSeconds : 0,
-            child: CustomPaint(
-              size: Size.square(size),
-              painter: _BubblePainter(
-                color: _colorOf(bubble.color),
-                iconColor: _colorOf(bubble.iconColor),
-                glass: bubble.style == AffiliateoChatBubbleStyle.glass,
-                badge: badgeText(state.unread),
-                online: state.online,
+      // Hide mode rocks the whole bubble, the X with it, around the circle's center.
+      child: _ChatJiggle(
+        on: _hideMode && !reduceMotion,
+        origin: Offset(-size / 2, -size / 2),
+        child: SizedBox(
+          width: size + reach,
+          height: size + reach,
+          child: Stack(
+            clipBehavior: Clip.none,
+            textDirection: TextDirection.ltr,
+            children: [
+              Positioned(
+                right: 0,
+                bottom: 0,
+                child: Semantics(
+                  container: true,
+                  button: true,
+                  label: label,
+                  excludeSemantics: true,
+                  // A screen reader hides it at once, with no hold (4.19.0).
+                  customSemanticsActions: {CustomSemanticsAction(label: hideWords): _hideNow},
+                  child: Listener(
+                    onPointerDown: _bubbleDown,
+                    // Hold to hide (4.19.0): wins only when the finger stays
+                    // within the touch slop for the whole second. Moving past
+                    // it first is a drag and lifting first is a tap, as before.
+                    child: RawGestureDetector(
+                      gestures: <Type, GestureRecognizerFactory>{
+                        LongPressGestureRecognizer: GestureRecognizerFactoryWithHandlers<LongPressGestureRecognizer>(
+                          () => LongPressGestureRecognizer(duration: holdToHideDuration, debugOwner: this),
+                          (recognizer) => recognizer.onLongPressStart = (_) => _holdDone(),
+                        ),
+                      },
+                      child: GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onTap: () {
+                          if (!_spentTouch) _open();
+                        },
+                        onPanStart: (_) {
+                          if (_spentTouch) return;
+                          _start = pos;
+                          _moved = Offset.zero;
+                          _moving = false;
+                        },
+                        onPanUpdate: (d) {
+                          if (_spentTouch) return;
+                          _moved += d.delta;
+                          if (!_moving && _moved.dx.abs() + _moved.dy.abs() < 6) return;
+                          // A bubble being dragged holds still (the rebuild rests its wiggle).
+                          _moving = true;
+                          setState(() => _dragged = clamp(Offset(_start.dx - _moved.dx, _start.dy - _moved.dy)));
+                        },
+                        onPanEnd: (_) {
+                          if (_spentTouch) return;
+                          if (!_moving) {
+                            _open();
+                            return;
+                          }
+                          // Let go: it may wiggle again, a full wait from now.
+                          setState(() => _moving = false);
+                          final at = _dragged;
+                          if (appId != null && at != null) {
+                            unawaited(
+                                _prefs().then((p) => p?.setString(_posKey(appId), jsonEncode({'x': at.dx, 'y': at.dy}))));
+                          }
+                        },
+                        onPanCancel: () {
+                          if (_moving) setState(() => _moving = false);
+                        },
+                        // The whole bubble moves as one piece: the red number and the
+                        // green dot are part of the drawing.
+                        child: _ChatWiggle(
+                          seconds: wiggles ? bubble.wiggleSeconds : 0,
+                          child: CustomPaint(
+                            size: Size.square(size),
+                            painter: _BubblePainter(
+                              color: _colorOf(bubble.color),
+                              iconColor: _colorOf(bubble.iconColor),
+                              glass: bubble.style == AffiliateoChatBubbleStyle.glass,
+                              badge: badgeText(state.unread),
+                              // The X takes the green dot's corner in hide mode.
+                              online: state.online && !_hideMode,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
               ),
-            ),
+              // The X (4.19.0): its square at (-3, -3) from the circle's
+              // top-left, in a 36-point target. Over the circle, so it wins
+              // a touch where the two meet.
+              if (_hideMode)
+                Positioned(
+                  left: 0,
+                  top: 0,
+                  child: Semantics(
+                    container: true,
+                    button: true,
+                    label: hideWords,
+                    excludeSemantics: true,
+                    onTap: _hideNow,
+                    child: GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: _hideNow,
+                      child: SizedBox.square(
+                        dimension: hideXTarget,
+                        child: Center(
+                          child: CustomPaint(
+                            size: const Size.square(hideXSize),
+                            painter: _HideXPainter(border: BadgeMetrics(size).border),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+            ],
           ),
         ),
       ),
     );
   }
+}
+
+/// Hide mode's rock (4.19.0): the whole bubble, its X included, turns between
+/// -2.5 and +2.5 degrees around the circle's center, one swing every 130 ms
+/// with ease-in-out, back and forth while [on]. It starts from level, and is
+/// level again at once when [on] goes false. The same rhythm as the Affiliateo
+/// app's revenue cards in edit mode (chat_rules.dart jiggleAngle).
+class _ChatJiggle extends StatefulWidget {
+  const _ChatJiggle({required this.on, required this.origin, required this.child});
+
+  final bool on;
+
+  /// The center of the turn, from the box's bottom-right corner.
+  final Offset origin;
+  final Widget child;
+
+  @override
+  State<_ChatJiggle> createState() => _ChatJiggleState();
+}
+
+class _ChatJiggleState extends State<_ChatJiggle> with SingleTickerProviderStateMixin {
+  // 0.5 is level: the middle of a swing.
+  late final AnimationController _swing = AnimationController(vsync: this, duration: jiggleSwingDuration, value: 0.5);
+
+  @override
+  void initState() {
+    super.initState();
+    _sync();
+  }
+
+  @override
+  void didUpdateWidget(_ChatJiggle oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.on != oldWidget.on) _sync();
+  }
+
+  void _sync() {
+    if (widget.on) {
+      unawaited(_swing.repeat(reverse: true));
+    } else {
+      _swing.stop();
+      _swing.value = 0.5;
+    }
+  }
+
+  @override
+  void dispose() {
+    _swing.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _swing,
+      child: widget.child,
+      builder: (context, child) => Transform.rotate(
+        angle: widget.on ? jiggleAngle(Curves.easeInOut.transform(_swing.value)) * pi / 180 : 0,
+        alignment: Alignment.bottomRight,
+        origin: widget.origin,
+        child: child,
+      ),
+    );
+  }
+}
+
+/// Hide mode's X (4.19.0): a rounded square in the unread number's red with
+/// its white edge, and a white cross of two round-capped strokes.
+class _HideXPainter extends CustomPainter {
+  _HideXPainter({required this.border});
+
+  /// The white edge's width: the unread number's (BadgeMetrics.border).
+  final double border;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final box = RRect.fromRectAndRadius(Offset.zero & size, const Radius.circular(hideXRadius));
+    canvas.drawRRect(box, Paint()..color = const Color(hideXColor));
+    canvas.drawRRect(
+      box.deflate(border / 2),
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = border
+        ..color = const Color(0xFFFFFFFF),
+    );
+    final center = size.center(Offset.zero);
+    // Each stroke hideXCrossLength long, crossing at the middle.
+    final d = hideXCrossLength / 2 / sqrt2;
+    final cross = Paint()
+      ..color = const Color(0xFFFFFFFF)
+      ..strokeWidth = hideXCrossWidth
+      ..strokeCap = StrokeCap.round;
+    canvas.drawLine(center + Offset(-d, -d), center + Offset(d, d), cross);
+    canvas.drawLine(center + Offset(-d, d), center + Offset(d, -d), cross);
+  }
+
+  @override
+  bool shouldRepaint(_HideXPainter old) => old.border != border;
 }
 
 /// The wiggle (4.17.0, version 2): every [seconds] the bubble turns left and

@@ -1175,6 +1175,54 @@ class Affiliateo with WidgetsBindingObserver {
   /// ```
   static void setChatBubbleWiggle({required int? seconds}) => LiveChat.instance.setWiggle(seconds);
 
+  // ── Hold to hide (4.19.0) ──────────────────────────────────────────────
+
+  /// Runs [action] once each time the person hides the chat bubble
+  /// (4.19.0): they held it still for a second and tapped the red X, or used
+  /// the "Hide chat bubble" action of their screen reader. The bubble is
+  /// already gone and the phone remembers it, so it stays away on the next
+  /// launches too, until [restoreChatBubble]. Null clears it. Set it once,
+  /// at launch.
+  ///
+  /// Turn your app's own "Chat bubble" switch off here, so it says what the
+  /// person sees:
+  ///
+  /// ```dart
+  /// Affiliateo.onChatBubbleHidden(() {
+  ///   settings.chatBubble = false; // your switch goes off
+  ///   showNote('Chat bubble hidden. Turn it back on in Settings.');
+  /// });
+  /// ```
+  static void onChatBubbleHidden(VoidCallback? action) => LiveChat.instance.onHidden = action;
+
+  /// Brings back a chat bubble the person hid (4.19.0): the phone forgets
+  /// the hide, and the bubble shows again wherever [AffiliateoChat] is
+  /// placed with `visible` true. For your app's own "Chat bubble" switch
+  /// being turned back on:
+  ///
+  /// ```dart
+  /// onChanged: (on) {
+  ///   if (on) Affiliateo.restoreChatBubble();
+  ///   setState(() => settings.chatBubble = on); // AffiliateoChat(visible: settings.chatBubble)
+  /// }
+  /// ```
+  ///
+  /// `AffiliateoChat(visible: false)` and [logout] never touch the hide: it
+  /// belongs to the phone, like the bubble's place.
+  static void restoreChatBubble() => LiveChat.instance.restoreBubble();
+
+  /// Whether the person hid the chat bubble on this phone (4.19.0): true
+  /// until [restoreChatBubble]. While it is, a placed [AffiliateoChat] shows
+  /// no bubble; [openChat] and [chatAvailable] work as always, for a "Contact
+  /// support" button of your own. False before [configure] has said which
+  /// app this is.
+  ///
+  /// ```dart
+  /// final hidden = await Affiliateo.isChatBubbleHiddenByUser();
+  /// setState(() => settings.chatBubble = !hidden);
+  /// ```
+  static Future<bool> isChatBubbleHiddenByUser() => LiveChat.instance.hiddenByUser();
+
   // ── Live Chat notifications (4.17.0) ───────────────────────────────────
 
   /// Hand the SDK this phone's push token (4.17.0), so a reply from your

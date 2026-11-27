@@ -1,5 +1,12 @@
 name: affiliateo
 description: Mobile affiliate attribution, session tracking and Live Chat for Flutter apps.
+# 4.19.0: hold to hide the Live Chat bubble. Held still for a second, the
+# bubble rocks and shows a red X; a tap on the X hides it and the phone
+# remembers it (affiliateo_chat_hidden_<appId>) until
+# Affiliateo.restoreChatBubble(). Affiliateo.onChatBubbleHidden(action) tells
+# the app, and Affiliateo.isChatBubbleHiddenByUser() says whether it is
+# hidden. A tap anywhere else, or five seconds, ends hide mode. Screen readers
+# get a "Hide chat bubble" action. No new packages.
 # 4.18.0: affiliate codes. Affiliateo.setAffiliateCode(code) puts an
 # affiliate's code on this device: a coupon code without the coupon. The
 # buyer types the code in a box the app shows and that affiliate gets the
@@ -118,7 +125,7 @@ description: Mobile affiliate attribution, session tracking and Live Chat for Fl
 # paid-ad install (Meta / TikTok / Google Ads) gets its source labelled
 # server-side with zero merchant work. Additive, no API changes.
 # 3.0.0: event queue + reset/optOut/optIn/flush + TrackedScreen widget.
-version: 4.18.0
+version: 4.19.0
 homepage: https://affiliateo.com
 repository: https://github.com/affiliateo/affiliateo-flutter
 

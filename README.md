@@ -11,7 +11,7 @@ dependencies:
   affiliateo:
     git:
       url: https://github.com/affiliateo/affiliateo-flutter
-      ref: 4.18.0
+      ref: 4.19.0
 ```
 
 Then run `flutter pub get`.
@@ -501,6 +501,33 @@ The dashboard's "show on these screens" rules match the name you last passed
 to `Affiliateo.page(name)`, so call it per screen. If your app has its own
 navigator key, pass it as `navigatorKey`; otherwise the bubble finds the
 navigator itself.
+
+**Hold to hide (4.19.0).** Someone who does not want the bubble holds it still
+for a second: it rocks (it stays still with Reduce Motion on) and a red X shows
+on its top-left. A tap on the X hides it, and the phone remembers that, also
+after the app restarts. A tap anywhere else, or five seconds, leaves it as it
+was. A screen reader gets a "Hide chat bubble" action on the bubble. Moving it
+is still a drag, and a quick tap still opens the chat. Three calls go with it,
+for your app's own "Chat bubble" switch:
+
+```dart
+// At launch: your switch goes off when the person hides the bubble.
+Affiliateo.onChatBubbleHidden(() {
+  settings.chatBubble = false;           // AffiliateoChat(visible: settings.chatBubble, ...)
+  showNote('Chat bubble hidden. Turn it back on in Settings.');
+});
+
+// Your Settings switch.
+if (on) Affiliateo.restoreChatBubble();  // the phone forgets the hide
+settings.chatBubble = on;
+
+// Is the hide remembered on this phone? (false before configure())
+final hidden = await Affiliateo.isChatBubbleHiddenByUser();
+```
+
+While the hide is remembered no bubble shows; `openChat()` and
+`chatAvailable()` work as always, for a "Contact support" button of your own.
+`visible: false` and `logout()` never touch it.
 
 **How it works.** The chat is Affiliateo's hosted chat page in a sheet over
 your app, the same page the website bubble and the other SDKs open. The

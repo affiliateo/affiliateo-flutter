@@ -138,7 +138,8 @@ int? wiggleOverride(int? seconds) => seconds == null ? null : readWiggleSeconds(
 
 /// Whether the bubble may wiggle right now: it is on screen, the chat is
 /// closed, the app is in front, nobody is dragging it, the phone does not ask
-/// for less motion, and there is a wait to count.
+/// for less motion, it is not in hide mode (4.19.0), and there is a wait to
+/// count.
 bool mayWiggle({
   required int seconds,
   required bool visible,
@@ -146,8 +147,64 @@ bool mayWiggle({
   required bool appActive,
   required bool dragging,
   required bool reduceMotion,
+  bool hideMode = false,
 }) =>
-    seconds > 0 && visible && !chatOpen && appActive && !dragging && !reduceMotion;
+    seconds > 0 && visible && !chatOpen && appActive && !dragging && !reduceMotion && !hideMode;
+
+// ── Hold to hide (4.19.0): the same rules in every SDK that draws the bubble ──
+//
+// A finger kept still on the bubble for a second starts hide mode: the bubble
+// rocks like the Affiliateo app's revenue cards in edit mode and a red X
+// shows on its top-left. A tap on the X hides the bubble and remembers it on
+// this phone; a touch anywhere else, or five seconds, ends hide mode.
+
+/// How long a finger stays still on the bubble before hide mode starts.
+const Duration holdToHideDuration = Duration(milliseconds: 1000);
+
+/// How long hide mode lasts with no tap on the X.
+const Duration hideModeDuration = Duration(milliseconds: 5000);
+
+/// How far the bubble rocks each way in hide mode, in degrees.
+const double jiggleDegrees = 2.5;
+
+/// One swing of the rock, from one side to the other (ease-in-out).
+const Duration jiggleSwingDuration = Duration(milliseconds: 130);
+
+/// The turn in degrees for one swing's eased progress [t] (0 to 1): from
+/// -[jiggleDegrees] at 0, through level at 0.5, to +[jiggleDegrees] at 1.
+/// Anything outside 0 to 1 counts as the nearer end; not a number is level.
+double jiggleAngle(double t) {
+  if (t.isNaN) return 0;
+  return -jiggleDegrees + 2 * jiggleDegrees * t.clamp(0.0, 1.0);
+}
+
+/// The X's rounded square, in points: its side and corner radius.
+const double hideXSize = 18;
+const double hideXRadius = 6;
+
+/// Where the X's square starts, from the circle's top-left corner, in points
+/// (both ways): a little over the circle's edge.
+const double hideXOffset = -3;
+
+/// The X's touch target, in points (both ways), around its square.
+const double hideXTarget = 36;
+
+/// The X's fill: the red of the unread number.
+const int hideXColor = 0xFFEF4444;
+
+/// The white cross inside the X: each stroke's length and width, in points.
+const double hideXCrossLength = 8;
+const double hideXCrossWidth = 2;
+
+/// Where the phone remembers that the person hid the bubble, next to the
+/// bubble's dragged place (Flutter's SharedPreferences).
+String chatHiddenKey(String appId) => 'affiliateo_chat_hidden_$appId';
+
+/// Whether the bubble stays away because the person hid it: while the hide
+/// is [remembered], and also while the SDK is [configured] but has not yet
+/// [read] the phone's note (no bubble that shows for a moment and goes).
+bool bubbleHiddenByUser({required bool remembered, required bool read, required bool configured}) =>
+    remembered || (configured && !read);
 
 final RegExp _hex6 = RegExp(r'^#[0-9a-f]{6}$', caseSensitive: false);
 
@@ -504,25 +561,26 @@ String chatPageUrl({
 }
 
 /// The bubble's spoken words in the person's language, the 16 Affiliateo
-/// speaks, English for any other: the chat, closing it, and the unread count
-/// ({n}). The same words as chat.js and the other SDKs.
+/// speaks, English for any other: the chat, closing it, the unread count
+/// ({n}), and hiding the bubble (4.19.0: the X and the screen reader's
+/// action). The same words as chat.js and the other SDKs.
 const Map<String, List<String>> _chatWords = {
-  'en': ['Chat', 'Close chat', 'Chat, {n} unread'],
-  'ar': ['الدردشة', 'إغلاق الدردشة', 'الدردشة، {n} غير مقروءة'],
-  'de': ['Chat', 'Chat schließen', 'Chat, {n} ungelesen'],
-  'es': ['Chat', 'Cerrar chat', 'Chat, {n} sin leer'],
-  'fr': ['Chat', 'Fermer le chat', 'Chat, {n} non lus'],
-  'hi': ['चैट', 'चैट बंद करें', 'चैट, {n} अपठित'],
-  'it': ['Chat', 'Chiudi chat', 'Chat, {n} non letti'],
-  'ja': ['チャット', 'チャットを閉じる', 'チャット、未読 {n} 件'],
-  'ko': ['채팅', '채팅 닫기', '채팅, 읽지 않음 {n}개'],
-  'nl': ['Chat', 'Chat sluiten', 'Chat, {n} ongelezen'],
-  'pl': ['Czat', 'Zamknij czat', 'Czat, nieprzeczytane: {n}'],
-  'pt': ['Chat', 'Fechar chat', 'Chat, {n} não lidas'],
-  'ru': ['Чат', 'Закрыть чат', 'Чат, непрочитанных: {n}'],
-  'tr': ['Sohbet', 'Sohbeti kapat', 'Sohbet, {n} okunmamış'],
-  'vi': ['Trò chuyện', 'Đóng trò chuyện', 'Trò chuyện, {n} chưa đọc'],
-  'zh': ['聊天', '关闭聊天', '聊天，{n} 条未读'],
+  'en': ['Chat', 'Close chat', 'Chat, {n} unread', 'Hide chat bubble'],
+  'ar': ['الدردشة', 'إغلاق الدردشة', 'الدردشة، {n} غير مقروءة', 'إخفاء فقاعة الدردشة'],
+  'de': ['Chat', 'Chat schließen', 'Chat, {n} ungelesen', 'Chat-Blase ausblenden'],
+  'es': ['Chat', 'Cerrar chat', 'Chat, {n} sin leer', 'Ocultar burbuja de chat'],
+  'fr': ['Chat', 'Fermer le chat', 'Chat, {n} non lus', 'Masquer la bulle de chat'],
+  'hi': ['चैट', 'चैट बंद करें', 'चैट, {n} अपठित', 'चैट बबल छिपाएँ'],
+  'it': ['Chat', 'Chiudi chat', 'Chat, {n} non letti', 'Nascondi la bolla della chat'],
+  'ja': ['チャット', 'チャットを閉じる', 'チャット、未読 {n} 件', 'チャットバブルを非表示'],
+  'ko': ['채팅', '채팅 닫기', '채팅, 읽지 않음 {n}개', '채팅 버블 숨기기'],
+  'nl': ['Chat', 'Chat sluiten', 'Chat, {n} ongelezen', 'Chatbubbel verbergen'],
+  'pl': ['Czat', 'Zamknij czat', 'Czat, nieprzeczytane: {n}', 'Ukryj dymek czatu'],
+  'pt': ['Chat', 'Fechar chat', 'Chat, {n} não lidas', 'Ocultar balão do chat'],
+  'ru': ['Чат', 'Закрыть чат', 'Чат, непрочитанных: {n}', 'Скрыть значок чата'],
+  'tr': ['Sohbet', 'Sohbeti kapat', 'Sohbet, {n} okunmamış', 'Sohbet balonunu gizle'],
+  'vi': ['Trò chuyện', 'Đóng trò chuyện', 'Trò chuyện, {n} chưa đọc', 'Ẩn bong bóng trò chuyện'],
+  'zh': ['聊天', '关闭聊天', '聊天，{n} 条未读', '隐藏聊天气泡'],
 };
 
 /// The bubble's words for a language tag ("pt-BR", "zh_Hans"): its first two
@@ -531,6 +589,10 @@ List<String> chatWords(String language) {
   final tag = (language.isEmpty ? 'en' : language).toLowerCase();
   return _chatWords[tag.length >= 2 ? tag.substring(0, 2) : tag] ?? _chatWords['en']!;
 }
+
+/// The words for hiding the bubble (4.19.0), the X's label and the screen
+/// reader's action, for a language tag: the same lookup as [chatWords].
+String hideBubbleWords(String language) => chatWords(language)[3];
 
 /// Whether a link may go to the browser: web addresses only. Any other scheme
 /// (another app's, intent:, file:, javascript:) opens nothing.
